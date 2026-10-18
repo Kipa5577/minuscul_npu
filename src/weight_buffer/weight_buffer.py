@@ -1,16 +1,16 @@
 """
-weight_buffer — SRAM des poids (spécification : src/weight_buffer/interface.md)
+weight_buffer — Weight SRAM (specification: src/weight_buffer/interface.md)
 
-Mémoire simple port de 2^BAW mots de N·DW bits (1024 × 32 bits en v1), vue par deux ports logiques :
-  - port hôte (host_*) : actif quand busy = 0 (chargement de W, relecture)
-  - port cœur (core_*) : actif quand busy = 1 (lecture par le data_feeder pendant un GEMM)
-Les accès du port inactif sont ignorés.
+Single-port memory of 2^BAW words of N·DW bits (1024 × 32 bits in v1), seen through two logical ports:
+  - host port (host_*): active when busy = 0 (loading W, reading back)
+  - core port (core_*): active when busy = 1 (read by the data_feeder during a GEMM)
+Accesses on the inactive port are ignored.
 
-Lecture synchrone : rdata est un registre, mis à jour au front si re = 1 sur le port actif, sinon il garde sa valeur.
-host_rdata et core_rdata sont la même valeur (un seul registre de lecture, comme une vraie SRAM simple port).
-Le contenu n'est pas réinitialisé (pas de rst_n).
+Synchronous read: rdata is a register, updated at the edge if re = 1 on the active port, otherwise it keeps its value.
+host_rdata and core_rdata are the same value (a single read register, like a real single-port SRAM).
+The contents are not reset (no rst_n).
 
-Description comportementale : clock() uniquement.
+Behavioural description: clock() only.
 """
 
 from py4hw import Logic, Wire
@@ -46,7 +46,7 @@ class WeightBuffer(Logic):
         else:
             addr = self.host_addr.get()
             if self.host_re.get():
-                self.rdata_r = self.mem[addr]                 # lecture de l'ancienne valeur si écriture simultanée
+                self.rdata_r = self.mem[addr]                 # reads the old value on a simultaneous write
             if self.host_we.get():
                 self.mem[addr] = self.host_wdata.get()
 

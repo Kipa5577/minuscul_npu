@@ -1,18 +1,18 @@
 """
-data_feeder — Alignement, masquage et décalage des flux (spécification : src/data_feeder/interface.md)
+data_feeder — Alignment, masking and skewing of the streams (specification: src/data_feeder/interface.md)
 
-  1. Aligner  : les masques et ctl émis par le controller sont retardés d'un cycle,
-                pour arriver en même temps que les données de la SRAM (latence de lecture = 1).
-  2. Masquer  : les voies hors limites sont forcées à 0.
-  3. Décaler  : la voie l d'un flux décalé traverse l registres (escalier systolique).
+  1. Align: the masks and ctl emitted by the controller are delayed by one cycle,
+            so that they arrive at the same time as the data from the SRAM (read latency = 1).
+  2. Mask : out-of-bounds lanes are forced to 0.
+  3. Skew : lane l of a skewed stream goes through l registers (systolic staircase).
 
-Deux variantes :
-  - DataFeeder_OS : W et X sont décalés
-  - DataFeeder_WS : W n'est pas décalé (préchargement diffusé), X est décalé
+Two variants:
+  - DataFeeder_OS: W and X are skewed
+  - DataFeeder_WS: W is not skewed (broadcast preload), X is skewed
 
-Description comportementale :
-  - clock()     : registres d'alignement et chaînes de décalage
-  - propagate() : masquage et sorties (la voie 0 d'un flux décalé n'a pas de registre)
+Behavioural description:
+  - clock()    : alignment registers and skew chains
+  - propagate(): masking and outputs (lane 0 of a skewed stream has no register)
 """
 
 from py4hw import Logic, Wire
@@ -51,7 +51,7 @@ class _DataFeeder(Logic):
         self.w_mask_r = 0
         self.x_mask_r = 0
         self.ctl_r = 0
-        # chaîne de la voie l : l registres, l'élément [-1] est la sortie de la voie
+        # chain of lane l: l registers, element [-1] is the output of the lane
         self.w_chain = [[0] * l for l in range(N)]
         self.x_chain = [[0] * l for l in range(N)]
 
@@ -81,18 +81,18 @@ class _DataFeeder(Logic):
         for l in range(1, len(masked)):
             chain[l] = [masked[l]] + chain[l][:-1]
 
-    # --- comportement -------------------------------------------------------------------
+    # --- behaviour ----------------------------------------------------------------------
 
     def clock(self):
         if not self.rst_n.get():
             self._reset_state()
             return
-        # les chaînes avancent avec les valeurs masquées présentes pendant ce cycle
+        # the chains advance with the masked values present during this cycle
         if self.SKEW_W:
             self._shift(self._masked(self.w_rdata, self.w_mask_r), self.w_chain)
         if self.SKEW_X:
             self._shift(self._masked(self.x_rdata, self.x_mask_r), self.x_chain)
-        # étage d'alignement
+        # alignment stage
         self.w_mask_r = self.w_mask.get()
         self.x_mask_r = self.x_mask.get()
         self.ctl_r = self.ctl_in.get()
@@ -106,12 +106,12 @@ class _DataFeeder(Logic):
 
 
 class DataFeeder_OS(_DataFeeder):
-    """W → w_west et X → x_north, tous deux décalés ; ctl → clear."""
+    """W → w_west and X → x_north, both skewed; ctl → clear."""
     SKEW_W = True
     SKEW_X = True
 
 
 class DataFeeder_WS(_DataFeeder):
-    """W → w_north sans décalage (préchargement) ; X → x_west décalé ; ctl → load."""
+    """W → w_north without skew (preload); X → x_west skewed; ctl → load."""
     SKEW_W = False
     SKEW_X = True

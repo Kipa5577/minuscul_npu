@@ -1,22 +1,22 @@
 """
-Animation de l'output_drain : comment les résultats sortent de la grille, cycle par cycle.
+Animation of the output_drain: how the results leave the array, cycle by cycle.
 
-Le cœur de calcul complet (data_feeder → pe_array → output_drain) exécute un GEMM, piloté par le
-planificateur du test (ce que la FSM du controller émet). Seul l'output_drain est dessiné en détail.
+The complete compute core (data_feeder → pe_array → output_drain) runs a GEMM, driven by the
+scheduler of the test (what the controller FSM emits). Only the output_drain is drawn in detail.
 
-  - OS (en haut) : les accumulateurs de la grille montent pendant le flux ; une fois la tuile terminée,
-    l'output_drain lit une ligne par cycle et l'envoie vers le post_processing, avec son tag.
-    Les résultats sortent par rafales de N lignes.
-  - WS (en bas) : les sommes partielles sortent au sud de la grille en escalier ; les registres de
-    redressement les réalignent ; le sideband du controller traverse sa ligne à retard de 2N cycles
-    pour arriver en même temps. La première tuile de K écrit la mémoire d'accumulateurs (colonne j),
-    la dernière additionne et émet le résultat.
+  - OS (top): the accumulators of the array rise during the stream; once the tile is finished,
+    the output_drain reads one row per cycle and sends it to the post_processing, with its tag.
+    The results come out in bursts of N rows.
+  - WS (middle): the partial sums leave the array at the south in a staircase; the deskew
+    registers realign them; the controller sideband goes through its 2N-cycle delay line
+    to arrive at the same time. The first K tile writes the accumulator memory (column j),
+    the last one adds up and emits the result.
 
-En bas : le nombre d'éléments de Y sortis, pour les deux variantes.
+At the bottom: the number of elements of Y output, for both variants.
 
-Les valeurs sont celles de la simulation py4hw. Rendu ≥ 30 images/s (voir test/viz.py).
+The values are those of the py4hw simulation. Rendering ≥ 30 frames/s (see test/viz.py).
 
-Lancement : python test/output_drain/animation.py [--save fichier.gif] [--fps 30] [--cycle-ms 650]
+Run: python test/output_drain/animation.py [--save file.gif] [--fps 30] [--cycle-ms 650]
 """
 
 import sys
@@ -37,8 +37,8 @@ from matplotlib.ticker import MaxNLocator
 T = load_test_module('output_drain')
 AW, IW = T.AW, T.IW
 N = 4
-H = 6                     # résultats affichés dans l'historique
-C_SB = '#52514e'          # jetons du sideband
+H = 6                     # results shown in the history
+C_SB = '#52514e'          # sideband tokens
 EDGE = '#b9b8b2'
 
 
@@ -84,7 +84,7 @@ def describe(variant, tag):
     return f'Y[{idx}, {N * t}..{N * t + N - 1}]' if variant == 'OS' else f'Y[{N * t}..{N * t + N - 1}, {idx}]'
 
 
-# --- Panneau OS ------------------------------------------------------------------------------------------
+# --- OS panel --------------------------------------------------------------------------------------------
 
 class PanelOS:
     X_RES = 5.3
@@ -97,8 +97,8 @@ class PanelOS:
         ax.set_aspect('equal')
         ax.axis('off')
         ax.text(-1.35, -1.25, 'output-stationary', fontsize=13, fontweight='bold', color=C_OS, va='center')
-        for x, lab in ((1.5, 'accumulateurs de la grille (Σ)'), (self.X_RES, 'res'),
-                       (self.X_HIST + (H - 1) / 2, 'vers le post_processing')):
+        for x, lab in ((1.5, 'array accumulators (Σ)'), (self.X_RES, 'res'),
+                       (self.X_HIST + (H - 1) / 2, 'to the post_processing')):
             ax.text(x, -0.75, lab, ha='center', va='center', fontsize=8, color=TEXT_2)
         for i in range(N):
             ax.text(-0.75, i, f'i{i}', ha='center', va='center', fontsize=8, color=TEXT_2)
@@ -129,33 +129,33 @@ class PanelOS:
         if draining:
             bv, bc = box_path(N - 0.02, 0.1, 0.98)
             self.band.add(bv + ((N - 1) / 2, row), bc, 'none', ec_alpha=1 - 0.6 * s)
-            for j in range(N):                       # la ligne vole vers le registre res (front de fin de cycle)
+            for j in range(N):                       # the row flies to the res register (edge at the end of the cycle)
                 x = j + (self.X_RES - j) * e
                 y = row + (j - row) * e
                 self.tokens.token(x, y, r['acc'][row][j], C_P, text_color=TEXT, size=0.5)
         if live and r['valid']:
             for l in range(N):
                 self.tokens.token(self.X_RES, l, r['res'][l], C_P, text_color=TEXT, size=0.56)
-        # historique : les H derniers résultats sortis, le plus récent à droite
-        sortis = [(k, recs[k]) for k in range(min(c, len(recs) - 1) + 1) if recs[k]['valid'] and (k < c or s >= 0.5)]
+        # history: the last H results output, the most recent on the right
+        outs = [(k, recs[k]) for k in range(min(c, len(recs) - 1) + 1) if recs[k]['valid'] and (k < c or s >= 0.5)]
         hv, hc = RECT
         for h in range(H):
-            k = len(sortis) - H + h
+            k = len(outs) - H + h
             for l in range(N):
                 self.hist.add(hv * 0.86 + (self.X_HIST + h, l), hc, CELL)
             if k >= 0:
-                _, rr = sortis[k]
+                _, rr = outs[k]
                 for l in range(N):
                     self.hist.add(hv * 0.86 + (self.X_HIST + h, l), hc, C_P, 0.85)
                     self.hist_txt.text(self.X_HIST + h, l, str(rr['res'][l]), TEXT, pt=7)
                 self.hist_txt.text(self.X_HIST + h, N - 0.2, describe('OS', rr['tag']).replace('..', '–'),
                                    TEXT_2, bold=False, pt=6)
-        self.phase.set_text(r['phase'] if live else 'terminé')
+        self.phase.set_text(r['phase'] if live else 'finished')
         return [self.cells.commit(), self.vals.commit(), self.band.commit(), self.hist.commit(),
                 self.hist_txt.commit()] + self.tokens.commit() + [self.phase]
 
 
-# --- Panneau WS ------------------------------------------------------------------------------------------
+# --- WS panel --------------------------------------------------------------------------------------------
 
 class PanelWS:
 
@@ -172,9 +172,9 @@ class PanelWS:
         ax.axis('off')
         ax.text(-2 * N + N - 1.55, -1.25, 'weight-stationary', fontsize=13, fontweight='bold', color=C_WS,
                 va='center')
-        for x, lab in ((0, 'sud'), ((N - 1) / 2 + 0.5, 'redressement'), (self.X_SUM, 'Σ'),
-                       (self.X_MEM + (J - 1) / 2, 'mémoire d\'accumulateurs'), (self.X_RES, 'res'),
-                       (self.X_HIST + (H - 1) / 2, 'vers le post_processing')):
+        for x, lab in ((0, 'south'), ((N - 1) / 2 + 0.5, 'deskew'), (self.X_SUM, 'Σ'),
+                       (self.X_MEM + (J - 1) / 2, 'accumulator memory'), (self.X_RES, 'res'),
+                       (self.X_HIST + (H - 1) / 2, 'to the post_processing')):
             ax.text(x, -0.75, lab, ha='center', va='center', fontsize=8, color=TEXT_2)
         for j in range(J):
             ax.text(self.X_MEM + j, N - 0.35, f'j{j}', ha='center', va='center', fontsize=7, color=TEXT_2)
@@ -185,9 +185,9 @@ class PanelWS:
                 ax.add_patch(plt.Rectangle((r - 0.4, i - 0.4), 0.8, 0.8, fc=SURFACE, ec=EDGE, lw=1.2))
             ax.add_patch(plt.Rectangle((self.X_SUM - 0.42, i - 0.42), 0.84, 0.84, fc='none', ec=EDGE, lw=1, ls=':'))
             ax.add_patch(plt.Rectangle((self.X_RES - 0.42, i - 0.42), 0.84, 0.84, fc='none', ec=EDGE, lw=1.2))
-        # ligne à retard du sideband : 2N registres, le dernier est aligné sur la colonne Σ
+        # sideband delay line: 2N registers, the last one is aligned with the Σ column
         self.sb_x = [self.X_SUM - (2 * N - 1) + p for p in range(2 * N)]
-        ax.text(self.sb_x[0] - 1, self.Y_SB - 0.62, 'sideband : ligne à retard de 2N cycles', fontsize=8,
+        ax.text(self.sb_x[0] - 1, self.Y_SB - 0.62, 'sideband: 2N-cycle delay line', fontsize=8,
                 color=TEXT_2, va='center')
         for x in self.sb_x:
             ax.add_patch(plt.Rectangle((x - 0.45, self.Y_SB - 0.25), 0.9, 0.5, fc=SURFACE, ec=EDGE, lw=1))
@@ -218,7 +218,7 @@ class PanelWS:
         e = ease(s / 0.45)
         tok = self.tokens.token
         mv, mc = box_path(0.86, 0.06)
-        # mémoire d'accumulateurs (contenu pendant ce cycle ; l'écriture a lieu au front)
+        # accumulator memory (contents during this cycle; the write takes place at the edge)
         sb = r['sb'][-1] if live else None
         nxt = recs[c + 1]['mem'] if live and c + 1 < len(recs) else r['mem']
         for j in range(self.J):
@@ -231,7 +231,7 @@ class PanelWS:
                 if used or written:
                     self.mem_txt.text(self.X_MEM + j, i, str(val), TEXT, pt=7)
         if live:
-            # 1. sortie sud de la grille (escalier) et registres de redressement
+            # 1. south output of the array (staircase) and deskew registers
             for i in range(N):
                 if r['south'][i]:
                     tok(0, i - 0.6 + 0.6 * ease(s / 0.3), r['south'][i], C_P, text_color=TEXT, size=0.46,
@@ -239,7 +239,7 @@ class PanelWS:
                 for k, v in enumerate(r['deskew'][i]):
                     if v:
                         tok(k + e, i, v, C_P, text_color=TEXT, size=0.46)
-            # 2. étage aligné : les N voies partent vers Σ ; lecture / écriture de la colonne j
+            # 2. aligned stage: the N lanes go to Σ; read / write of column j
             if sb and sb['valid']:
                 j = sb['j']
                 aligned = [r['deskew'][i][-1] if N - 1 - i else r['south'][i] for i in range(N)]
@@ -250,7 +250,7 @@ class PanelWS:
                     else:
                         total = aligned[i] + (0 if sb['first'] else r['mem'][j][i])
                         if sb['last']:
-                            pass                                    # le résultat apparaît dans res au cycle suivant
+                            pass                                    # the result appears in res in the next cycle
                         else:
                             xe = self.X_SUM + (self.X_MEM + j - self.X_SUM) * ease((s - 0.5) / 0.45)
                             tok(xe, i, total, C_P, text_color=TEXT, size=0.46)
@@ -259,41 +259,41 @@ class PanelWS:
                     self.mem_hi.add(bv + (self.X_MEM + j, (N - 1) / 2), bc, 'none', ec_alpha=1.0)
                 if not sb['last'] and s >= 0.5:
                     self.mem_hi.add(bv + (self.X_MEM + j, (N - 1) / 2), bc, 'none', ec_alpha=1 - (s - 0.5))
-            # 3. registre res (visible le cycle suivant l'émission)
+            # 3. res register (visible in the cycle after the emission)
             if r['valid']:
                 for i in range(N):
                     tok(self.X_RES, i, r['res'][i], C_P, text_color=TEXT, size=0.56)
-            # 4. sideband : entrée du controller, puis 2N registres
+            # 4. sideband: input from the controller, then 2N registers
             self.sb_token(self.sb_x[0] - 1 + 1 * e if False else self.sb_x[0] - 1, r['sb_in'], alpha=ease(s / 0.3))
             for p, entry in enumerate(r['sb']):
                 self.sb_token(self.sb_x[p] - 1 + e, entry)
-        # historique des résultats
-        sortis = [recs[k] for k in range(min(c, len(recs) - 1) + 1) if recs[k]['valid'] and (k < c or s >= 0.5)]
+        # history of the results
+        outs = [recs[k] for k in range(min(c, len(recs) - 1) + 1) if recs[k]['valid'] and (k < c or s >= 0.5)]
         hv, hc = RECT
         for h in range(H):
-            k = len(sortis) - H + h
+            k = len(outs) - H + h
             for i in range(N):
                 self.hist.add(hv * 0.86 + (self.X_HIST + h, i), hc, C_P if k >= 0 else CELL, 0.85 if k >= 0 else 1)
                 if k >= 0:
-                    self.hist_txt.text(self.X_HIST + h, i, str(sortis[k]['res'][i]), TEXT, pt=7)
+                    self.hist_txt.text(self.X_HIST + h, i, str(outs[k]['res'][i]), TEXT, pt=7)
             if k >= 0:
-                self.hist_txt.text(self.X_HIST + h, N - 0.2, describe('WS', sortis[k]['tag']).replace('..', '–'),
+                self.hist_txt.text(self.X_HIST + h, N - 0.2, describe('WS', outs[k]['tag']).replace('..', '–'),
                                    TEXT_2, bold=False, pt=6)
-        self.phase.set_text(r['phase'] if live else 'terminé')
+        self.phase.set_text(r['phase'] if live else 'finished')
         return [self.mem.commit(), self.mem_txt.commit(), self.mem_hi.commit(), self.hist.commit(),
                 self.hist_txt.commit()] + self.sb.commit() + self.tokens.commit() + [self.phase]
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--save', help='enregistre l\'animation (gif) au lieu de l\'afficher')
-    ap.add_argument('--fps', type=int, default=30, help='images par seconde')
-    ap.add_argument('--cycle-ms', type=int, default=650, help='durée d\'un cycle d\'horloge à l\'écran (ms)')
+    ap.add_argument('--save', help='saves the animation (gif) instead of showing it')
+    ap.add_argument('--fps', type=int, default=30, help='frames per second')
+    ap.add_argument('--cycle-ms', type=int, default=650, help='on-screen duration of one clock cycle (ms)')
     args = ap.parse_args()
     SUB = max(1, round(args.fps * args.cycle_ms / 1000))
 
-    rec_os, cum_os, _ = capture('OS', M=4, K=4, Nd=8, seed=5)          # 2 tuiles de sortie
-    rec_ws, cum_ws, J = capture('WS', M=4, K=8, Nd=4, seed=6)          # 2 tuiles de K : écriture puis émission
+    rec_os, cum_os, _ = capture('OS', M=4, K=4, Nd=8, seed=5)          # 2 output tiles
+    rec_ws, cum_ws, J = capture('WS', M=4, K=8, Nd=4, seed=6)          # 2 K tiles: write then emission
     n_cycles = max(len(rec_os), len(rec_ws)) + 2
     n_frames = n_cycles * SUB
 
@@ -313,20 +313,20 @@ def main():
         ax_u.spines[sp].set_color(GRID)
     ax_u.grid(color=GRID, lw=0.8)
     ax_u.set_axisbelow(True)
-    ax_u.set_ylabel('éléments de Y sortis', fontsize=9, color=TEXT_2)
+    ax_u.set_ylabel('elements of Y output', fontsize=9, color=TEXT_2)
     ax_u.set_xlabel('cycle', fontsize=9, color=TEXT_2)
     ax_u.tick_params(labelsize=8, colors=TEXT_2)
     ax_u.yaxis.set_major_locator(MaxNLocator(integer=True))
     ax_u.set_ylim(0, max(cum_os[-1], cum_ws[-1]) * 1.15)
-    l_os, = ax_u.step([], [], where='post', color=C_OS, lw=2, label='OS (rafales)', animated=True)
-    l_ws, = ax_u.step([], [], where='post', color=C_WS, lw=2, label='WS (à la dernière tuile de K)', animated=True)
+    l_os, = ax_u.step([], [], where='post', color=C_OS, lw=2, label='OS (bursts)', animated=True)
+    l_ws, = ax_u.step([], [], where='post', color=C_WS, lw=2, label='WS (at the last K tile)', animated=True)
     cursor = ax_u.axvline(0, ymin=0.02, ymax=0.95, color=TEXT_2, lw=1, animated=True)
     ax_u.legend(loc='upper left', fontsize=8, frameon=False, ncols=2)
 
     title = title_axes(fig, (0, 0.955, 1, 0.045)).text(0.5, 0.75, '', ha='center', va='top', fontsize=14,
                                                         fontweight='bold', color=TEXT, animated=True)
-    fig.text(0.5, 0.94, 'jeton jaune : somme partielle / résultat int32   ·   jeton gris : sideband du controller '
-             '(F = première tuile de K, L = dernière)   ·   cadre : lecture / écriture', ha='center', fontsize=9,
+    fig.text(0.5, 0.94, 'yellow token: partial sum / int32 result   ·   grey token: controller sideband '
+             '(F = first K tile, L = last)   ·   frame: read / write', ha='center', fontsize=9,
              color=TEXT_2)
     fig.subplots_adjust(left=0.03, right=0.99, top=0.93, bottom=0.05)
 
@@ -346,7 +346,7 @@ def main():
             a.set_animated(False)
         anim = FuncAnimation(fig, frame, frames=n_frames, blit=False)
         anim.save(args.save, writer=PillowWriter(fps=args.fps), dpi=72)
-        print(f'animation enregistrée : {args.save}')
+        print(f'animation saved: {args.save}')
         return
 
     t0 = time.perf_counter()

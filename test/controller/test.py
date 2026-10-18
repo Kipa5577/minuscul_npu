@@ -1,14 +1,14 @@
 """
-Test fonctionnel du controller (spécification : src/controller/interface.md).
+Functional test of the controller (specification: src/controller/interface.md).
 
-  - cycle par cycle, le controller émet exactement ce qu'émet le planificateur de référence (plan_os / plan_ws de
-    test/output_drain/test.py), lui-même validé de bout en bout : adresses, lectures, masques, ctl, vidage ou
-    sideband, tags ; puis un cycle DONE
-  - busy, done, cycles ; dimensions invalides ; go ignoré pendant un GEMM ; reset en cours de route ; GEMM successifs
-  - de bout en bout : controller + chemin de données complet avec mémoires (tout le NPU sauf host_interface),
-    piloté par go / done comme le fera l'hôte, y compris deux couches enchaînées
+  - cycle by cycle, the controller emits exactly what the reference scheduler emits (plan_os / plan_ws from
+    test/output_drain/test.py), itself validated end to end: addresses, reads, masks, ctl, drain or
+    sideband, tags; then one DONE cycle
+  - busy, done, cycles; invalid dimensions; go ignored during a GEMM; reset midway; successive GEMMs
+  - end to end: controller + complete datapath with memories (the whole NPU except host_interface),
+    driven by go / done as the host will drive it, including two chained layers
 
-Lancement : python test/controller/test.py
+Run: python test/controller/test.py
 """
 
 import sys
@@ -27,7 +27,7 @@ AB = load_test_module('activation_buffer')
 IW = 6
 
 
-# --- Banc ----------------------------------------------------------------------------------------------------
+# --- Bench ---------------------------------------------------------------------------------------------------
 
 def bench(variant='OS', N=4):
     TW = (64 // N).bit_length() - 1
@@ -52,7 +52,7 @@ def bench(variant='OS', N=4):
 
 
 def emission(b):
-    """Ce que le controller émet pendant le cycle courant, au format du planificateur."""
+    """What the controller emits during the current cycle, in the format of the scheduler."""
     g = b.get
     e = dict(w_addr=g('w_addr') if g('w_re') else None, x_addr=g('x_addr') if g('x_re') else None,
              w_mask=g('w_mask'), x_mask=g('x_mask'), ctl=g('ctl'), tag=g('tag'))
@@ -63,14 +63,14 @@ def emission(b):
     return e
 
 
-def attendu(p, variant):
+def expected(p, variant):
     keys = ['w_addr', 'x_addr', 'w_mask', 'x_mask', 'ctl', 'tag']
     keys += ['drain_en', 'drain_row'] if variant == 'OS' else ['s_valid', 's_j', 's_first', 's_last']
     return {k: p[k] for k in keys}
 
 
-def lancer(b, M, K, Nd):
-    """go au cycle courant ; après le front, les sorties sont celles de la première émission."""
+def start(b, M, K, Nd):
+    """go in the current cycle; after the edge, the outputs are those of the first emission."""
     b.step(go=1, dim_m=M, dim_k=K, dim_n=Nd)
     b.set(go=0)
 
@@ -85,95 +85,95 @@ DIMS = [(4, 4, 4), (1, 1, 1), (10, 7, 9), (5, 13, 6), (16, 3, 16), (64, 2, 5), (
 
 # --- Tests -----------------------------------------------------------------------------------------------------
 
-def test_identique_au_planificateur():
+def test_identical_to_the_scheduler():
     for variant in ('OS', 'WS'):
         for N in (2, 4):
             for M, K, Nd in DIMS:
                 b = bench(variant, N)
-                lancer(b, M, K, Nd)
+                start(b, M, K, Nd)
                 for c, p in enumerate(plan(variant, M, K, Nd, N)):
                     assert b.get('busy') == 1, (variant, N, M, K, Nd, c)
-                    got, exp = emission(b), attendu(p, variant)
-                    assert got == exp, f'{variant} N={N} {M}×{K}×{Nd} cycle {c} ({p["phase"]}) : {got} ≠ {exp}'
+                    got, exp = emission(b), expected(p, variant)
+                    assert got == exp, f'{variant} N={N} {M}×{K}×{Nd} cycle {c} ({p["phase"]}): {got} ≠ {exp}'
                     b.step()
-                assert (b.get('done'), b.get('busy')) == (1, 0), 'un cycle DONE après le plan'
+                assert (b.get('done'), b.get('busy')) == (1, 0), 'one DONE cycle after the plan'
                 b.step()
-                assert (b.get('done'), b.get('busy')) == (0, 0), 'retour à IDLE'
+                assert (b.get('done'), b.get('busy')) == (0, 0), 'back to IDLE'
 
 
-def test_compteur_de_cycles():
+def test_cycle_counter():
     for variant in ('OS', 'WS'):
         b = bench(variant)
         n = len(plan(variant, 8, 8, 8))
-        lancer(b, 8, 8, 8)
+        start(b, 8, 8, 8)
         b.step()
-        assert b.get('cycles') == 1, 'compte depuis la première émission'
+        assert b.get('cycles') == 1, 'counts from the first emission'
         while not b.get('done'):
             b.step()
         b.step()
-        assert b.get('cycles') == n + 1, 'plan + cycle DONE'
+        assert b.get('cycles') == n + 1, 'plan + DONE cycle'
         b.step()
-        assert b.get('cycles') == n + 1, 'conservé jusqu\'au prochain go'
-        lancer(b, 4, 4, 4)
-        assert b.get('cycles') == 0, 'remis à 0 par go'
+        assert b.get('cycles') == n + 1, 'kept until the next go'
+        start(b, 4, 4, 4)
+        assert b.get('cycles') == 0, 'reset to 0 by go'
 
 
-def test_dimensions_invalides():
+def test_invalid_dimensions():
     for variant in ('OS', 'WS'):
         for dims in [(0, 4, 4), (4, 0, 4), (4, 4, 0), (65, 4, 4), (4, 127, 4)]:
             b = bench(variant)
-            lancer(b, *dims)
+            start(b, *dims)
             assert (b.get('done'), b.get('busy')) == (1, 0), (variant, dims)
-            assert emission(b) == attendu(OD.IDLE, variant), 'rien n\'est émis'
+            assert emission(b) == expected(OD.IDLE, variant), 'nothing is emitted'
             b.step()
             assert b.get('done') == 0
 
 
-def test_go_ignore_pendant_un_gemm():
+def test_go_ignored_during_a_gemm():
     for variant in ('OS', 'WS'):
         b = bench(variant)
-        lancer(b, 6, 5, 7)
+        start(b, 6, 5, 7)
         for c, p in enumerate(plan(variant, 6, 5, 7)):
-            assert emission(b) == attendu(p, variant), (variant, c)
-            b.step(go=c % 3 == 0, dim_m=1, dim_k=1, dim_n=1)   # go parasites, autres dimensions
+            assert emission(b) == expected(p, variant), (variant, c)
+            b.step(go=c % 3 == 0, dim_m=1, dim_k=1, dim_n=1)   # spurious go, other dimensions
         assert b.get('done') == 1
 
 
-def test_reset_en_cours_de_gemm():
+def test_reset_during_a_gemm():
     for variant in ('OS', 'WS'):
         b = bench(variant)
-        lancer(b, 8, 8, 8)
+        start(b, 8, 8, 8)
         for _ in range(20):
             b.step()
         b.step(rst_n=0)
         b.set(rst_n=1)
         assert (b.get('busy'), b.get('done'), b.get('cycles')) == (0, 0, 0)
-        assert emission(b) == attendu(OD.IDLE, variant)
-        lancer(b, 3, 3, 3)                                    # repart normalement
+        assert emission(b) == expected(OD.IDLE, variant)
+        start(b, 3, 3, 3)                                    # starts again normally
         for c, p in enumerate(plan(variant, 3, 3, 3)):
-            assert emission(b) == attendu(p, variant)
+            assert emission(b) == expected(p, variant)
             b.step()
 
 
-def test_gemm_successifs():
+def test_successive_gemms():
     for variant in ('OS', 'WS'):
         b = bench(variant)
         for dims in [(5, 6, 7), (12, 2, 3), (1, 9, 1)]:
-            lancer(b, *dims)
+            start(b, *dims)
             for p in plan(variant, *dims):
-                assert emission(b) == attendu(p, variant), (variant, dims)
+                assert emission(b) == expected(p, variant), (variant, dims)
                 b.step()
             assert b.get('done') == 1
             b.step()
 
 
-# --- De bout en bout : tout le NPU sauf host_interface ------------------------------------------------------------
+# --- End to end: the whole NPU except host_interface ---------------------------------------------------------------
 
-def test_bout_en_bout_pilote_par_go_done():
+def test_end_to_end_driven_by_go_done():
     rng = np.random.default_rng(180)
     for variant in ('OS', 'WS'):
         b = OD.core(variant, ctrl=True)
-        AB.salir(b, rng)
+        AB.make_dirty(b, rng)
         for (M, K, Nd), relu in [((4, 4, 4), 1), ((9, 11, 6), 0), ((16, 16, 16), 1), ((3, 20, 2), 1)]:
             W = rng.integers(-128, 128, (M, K))
             X = rng.integers(-128, 128, (K, Nd))
@@ -181,11 +181,11 @@ def test_bout_en_bout_pilote_par_go_done():
             Mq, s = int(rng.integers(1, 1 << 16)), int(rng.integers(14, 24))
             Y, st = AB.run_layer(b, variant, W, X, bias, Mq, s, relu)
             assert (Y == PP.reference(W, X, bias + [0] * 64, Mq, s, relu)).all(), f'{variant} {M}×{K}×{Nd}'
-            assert st['calcul'] == len(plan(variant, M, K, Nd)) + 2, 'go + plan + DONE'
+            assert st['compute'] == len(plan(variant, M, K, Nd)) + 2, 'go + plan + DONE'
             assert b.get('cycles') == len(plan(variant, M, K, Nd)) + 1
 
 
-def test_bout_en_bout_deux_couches():
+def test_end_to_end_two_layers():
     rng = np.random.default_rng(181)
     X = rng.integers(-128, 128, (12, 6))
     W1, b1 = rng.integers(-128, 128, (10, 12)), list(rng.integers(-3000, 3000, 10))

@@ -1,26 +1,26 @@
 """
-host_interface — Bus hôte et registres (spécification : src/host_interface/interface.md)
+host_interface — Host bus and registers (specification: src/host_interface/interface.md)
 
-Décode le bus parallèle de 32 bits (adresse de mot sur 13 bits) :
-  bus_addr[12:10] = 000 → registres (bus_addr[3:0])
-                    001 → WEIGHT  : weight_buffer      (wb_addr  = bus_addr[9:0])
-                    01x → ACT_IN / ACT_OUT : activation_buffer (ab_addr = bus_addr[10:0], le bit 10 choisit le banc)
-                    100 → BIAS    : mémoire des biais du post_processing (bias_addr = bus_addr[5:0])
-                    autres → lecture de 0, écriture ignorée
+Decodes the 32-bit parallel bus (13-bit word address):
+  bus_addr[12:10] = 000 → registers (bus_addr[3:0])
+                    001 → WEIGHT : weight_buffer      (wb_addr  = bus_addr[9:0])
+                    01x → ACT_IN / ACT_OUT : activation_buffer (ab_addr = bus_addr[10:0], bit 10 selects the bank)
+                    100 → BIAS   : bias memory of the post_processing (bias_addr = bus_addr[5:0])
+                    others → reads return 0, writes are ignored
 
-Registres : ID (RO), CTRL (GO, RELU_EN), STATUS (RO : BUSY, DONE), DIM_M/K/N, REQ_MULT, REQ_SHIFT, CYCLES (RO).
-  - écrire CTRL avec GO = 1 envoie une impulsion `go` d'un cycle au controller (au cycle suivant l'écriture) ;
-  - DONE est mis à 1 par l'impulsion `done` du controller et remis à 0 par GO ; `irq` = DONE ;
-  - « occupé » = busy du controller OU impulsion go en cours : le controller ne passe busy à 1 qu'un cycle après
-    l'impulsion, et sans cela un accès de l'hôte juste après GO passerait avant le début du calcul ;
-  - quand le NPU est occupé : écritures de configuration, GO et accès aux mémoires sont ignorés, STATUS.BUSY vaut 1.
+Registers: ID (RO), CTRL (GO, RELU_EN), STATUS (RO: BUSY, DONE), DIM_M/K/N, REQ_MULT, REQ_SHIFT, CYCLES (RO).
+  - writing CTRL with GO = 1 sends a one-cycle `go` pulse to the controller (in the cycle after the write);
+  - DONE is set to 1 by the `done` pulse of the controller and cleared to 0 by GO; `irq` = DONE;
+  - "busy" = busy of the controller OR go pulse in progress: the controller only sets busy to 1 one cycle after
+    the pulse, and without this a host access right after GO would go through before the computation starts;
+  - when the NPU is busy: configuration writes, GO and memory accesses are ignored, STATUS.BUSY is 1.
 
-Lecture : latence 1 pour toutes les adresses. La cible lue est mémorisée au cycle de bus_re ; au cycle suivant,
-bus_rdata présente la valeur du registre (capturée au cycle de la demande) ou la donnée rendue par la mémoire.
+Read: latency 1 for all addresses. The target being read is latched at the bus_re cycle; in the next cycle,
+bus_rdata presents the register value (captured at the cycle of the request) or the data returned by the memory.
 
-Description comportementale :
-  - clock()     : registres de configuration, impulsion go, DONE, cible et donnée de lecture mémorisées
-  - propagate() : décodage d'adresse vers les mémoires (combinatoire) et multiplexeur de bus_rdata
+Behavioural description:
+  - clock()    : configuration registers, go pulse, DONE, latched read target and data
+  - propagate(): address decoding to the memories (combinational) and bus_rdata multiplexer
 """
 
 from py4hw import Logic, Wire
@@ -86,30 +86,30 @@ class HostInterface(Logic):
         self.relu_r = 0
         self.go_r = 0
         self.done_r = 0
-        self.sel_r = NONE                  # cible de la dernière lecture
-        self.reg_rdata_r = 0               # valeur de registre capturée au cycle de la demande
+        self.sel_r = NONE                  # target of the last read
+        self.reg_rdata_r = 0               # register value captured at the cycle of the request
 
-    # --- décodage ------------------------------------------------------------------------
+    # --- decoding -------------------------------------------------------------------------
 
     def _target(self, addr: int) -> str:
         top = addr >> 10
         return {0: REG, 1: WEIGHT, 2: ACT, 3: ACT, 4: BIAS}.get(top, NONE)
 
-    def _occupe(self) -> int:
+    def _is_busy(self) -> int:
         return self.busy.get() | self.go_r
 
     def _read_reg(self, r: int) -> int:
         if r == ID:
             return self.id_value
         if r == CTRL:
-            return self.relu_r << 1                                    # GO se relit 0
+            return self.relu_r << 1                                    # GO reads back as 0
         if r == STATUS:
-            return self._occupe() | (self.done_r << 1)
+            return self._is_busy() | (self.done_r << 1)
         if r == CYCLES:
             return self.cycles.get()
         return self.regs.get(r, 0)
 
-    # --- comportement ----------------------------------------------------------------------
+    # --- behaviour -------------------------------------------------------------------------
 
     def clock(self):
         if not self.rst_n.get():
@@ -117,15 +117,15 @@ class HostInterface(Logic):
             return
         addr, we, re = self.bus_addr.get(), self.bus_we.get(), self.bus_re.get()
         target = self._target(addr)
-        busy = self._occupe()
+        busy = self._is_busy()
 
-        # lecture : cible et valeur de registre mémorisées pour le cycle suivant
+        # read: target and register value latched for the next cycle
         if re:
             self.sel_r = target
             if target == REG:
                 self.reg_rdata_r = self._read_reg(addr & 0xF)
 
-        # impulsion go et DONE (GO prioritaire : il lance un nouveau GEMM)
+        # go pulse and DONE (GO has priority: it starts a new GEMM)
         self.go_r = 0
         if self.done.get():
             self.done_r = 1
@@ -145,10 +145,10 @@ class HostInterface(Logic):
     def propagate(self):
         addr, we, re = self.bus_addr.get(), self.bus_we.get(), self.bus_re.get()
         target = self._target(addr)
-        if self._occupe():                                  # pas d'accès aux mémoires pendant un GEMM
+        if self._is_busy():                                  # no memory access during a GEMM
             we = re = 0
 
-        # vers les mémoires (combinatoire)
+        # to the memories (combinational)
         self.host_wdata.put(self.bus_wdata.get())
         self.wb_addr.put(addr & ((1 << self.BAW) - 1))
         self.wb_we.put(int(we and target == WEIGHT))
@@ -170,6 +170,6 @@ class HostInterface(Logic):
         self.go.put(self.go_r)
         self.irq.put(self.done_r)
 
-        # donnée lue : registre capturé, ou donnée rendue par la mémoire ciblée au cycle précédent
+        # data read: captured register, or data returned by the memory targeted in the previous cycle
         self.bus_rdata.put({REG: self.reg_rdata_r, WEIGHT: self.wb_rdata.get(), ACT: self.ab_rdata.get(),
                             BIAS: self.bias_rdata.get(), NONE: 0}[self.sel_r])

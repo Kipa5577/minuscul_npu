@@ -1,106 +1,105 @@
-# Organisation des tests
+# Test organisation
 
-Chaque sous-dossier de `test/` est le banc de test d'**un bloc** ou d'**un assemblage de blocs**.
-Le nom d'un bloc est le même que celui de son dossier dans `src/`.
+Each subfolder of `test/` is the testbench of **one block** or of **an assembly of blocks**.
+The name of a block is the same as that of its folder in `src/`.
 
-## Lancer les tests
+## Running the tests
 
-Depuis la racine du dépôt, avec l'environnement Python du projet activé :
+From the root of the repository, with the project's Python environment activated:
 
 ```
-python test/<bloc>/test.py                      # tests fonctionnels : bilan « n/n tests réussis »
-python test/<bloc>/benchmark.py                 # figure matplotlib dans une fenêtre
-python test/<bloc>/benchmark.py --save b.png    # … ou enregistrée dans un fichier
-python test/<bloc>/animation.py                 # animation dans une fenêtre (≥ 30 images/s)
-python test/<bloc>/animation.py --save a.gif    # … ou enregistrée en GIF (environ une minute)
+python test/<block>/test.py                      # functional tests: summary "n/n tests passed"
+python test/<block>/benchmark.py                 # matplotlib figure in a window
+python test/<block>/benchmark.py --save b.png    # … or saved to a file
+python test/<block>/animation.py                 # animation in a window (≥ 30 frames/s)
+python test/<block>/animation.py --save a.gif    # … or saved as a GIF (about one minute)
 ```
 
-Les fichiers s'appellent `test.py` et non `test_*.py` : pytest ne les découvre pas automatiquement. On les lance
-directement avec `python`, et `test.py` renvoie un code de sortie non nul en cas d'échec.
+The files are called `test.py` and not `test_*.py`: pytest does not discover them automatically. They are run directly
+with `python`, and `test.py` returns a non-zero exit code on failure.
 
-## Les trois fichiers d'un banc de test
+## The three files of a testbench
 
-| Fichier | Rôle | Question à laquelle il répond | Résultat |
+| File | Role | Question it answers | Result |
 |---|---|---|---|
-| `test.py` | Test **fonctionnel** | « Le bloc fait-il exactement ce que la spécification demande ? » | Succès / échec |
-| `benchmark.py` | **Limites et compromis** | « Combien de cycles, quel débit, où ça casse ? » | Figure matplotlib à 4 panneaux + résumé chiffré dans le terminal |
-| `animation.py` | **Visualisation** au fil des cycles | « Que se passe-t-il à chaque front d'horloge ? » | Animation des valeurs qui circulent dans le bloc |
+| `test.py` | **Functional** test | "Does the block do exactly what the specification requires?" | Pass / fail |
+| `benchmark.py` | **Limits and trade-offs** | "How many cycles, what throughput, where does it break?" | 4-panel matplotlib figure + numerical summary in the terminal |
+| `animation.py` | **Visualisation** cycle after cycle | "What happens at each clock edge?" | Animation of the values flowing through the block |
 
-### Règles
-- **Modèle de référence** : tout résultat matériel est comparé à un calcul indépendant — NumPy pour les résultats,
-  et un modèle de référence Python écrit depuis la spécification pour les comparaisons cycle par cycle.
-- **Variantes de dataflow** : pour les blocs qui existent en deux versions (`pe`, `pe_array`, `data_feeder`,
-  `output_drain`), les trois fichiers traitent **les deux variantes, OS et WS**, afin que
-  `benchmark.py` puisse les comparer directement.
-- **Paramètres** : les tests balaient les paramètres de l'architecture (taille de grille N, dimensions M/K/N,
-  largeurs de bits) plutôt que de se limiter aux valeurs par défaut.
-- **Cas limites** : ils sont vérifiés dans `test.py` : valeurs extrêmes int8 (-128, 127), débordement,
-  dimensions non multiples de N, K = 1, reset en cours d'opération.
-- **Timing exact** : quand la spécification annonce une latence, le test vérifie que le résultat arrive
-  **à ce cycle-là**, ni avant ni après.
-- `test.py` doit passer avant qu'on fasse tourner `benchmark.py` ou `animation.py`.
-- **Benchmarks** : on mesure le comportement (cycles, débit, utilisation, limites numériques), pas le coût matériel.
-  Couleurs fixes : OS en bleu, WS en orange.
-- **Animations** : au moins 30 images par seconde, à vitesse constante. Toutes les valeurs affichées viennent de la
-  simulation py4hw, calculée entièrement avant l'animation.
+### Rules
+- **Reference model**: every hardware result is compared with an independent computation — NumPy for the results, and
+  a Python reference model written from the specification for cycle-by-cycle comparisons.
+- **Dataflow variants**: for the blocks that exist in two versions (`pe`, `pe_array`, `data_feeder`, `output_drain`),
+  the three files cover **both variants, OS and WS**, so that `benchmark.py` can compare them directly.
+- **Parameters**: the tests sweep the parameters of the architecture (array size N, dimensions M/K/N, bit widths)
+  rather than sticking to the default values.
+- **Corner cases**: they are checked in `test.py`: extreme int8 values (-128, 127), overflow, dimensions that are not
+  multiples of N, K = 1, reset during operation.
+- **Exact timing**: when the specification announces a latency, the test checks that the result arrives **at that very
+  cycle**, neither before nor after.
+- `test.py` must pass before `benchmark.py` or `animation.py` are run.
+- **Benchmarks**: we measure the behaviour (cycles, throughput, utilisation, numerical limits), not the hardware cost.
+  Fixed colours: OS in blue, WS in orange.
+- **Animations**: at least 30 frames per second, at a constant speed. All the displayed values come from the py4hw
+  simulation, computed entirely before the animation.
 
-## Outils partagés
+## Shared tools
 
-| Fichier | Contenu |
+| File | Contents |
 |---|---|
-| [`common.py`](common.py) | `Bench` : système py4hw minimal autour d'un bloc (`step()` avance d'un front ; `observe()` lit les sorties **pendant** le cycle, utile pour les sorties combinatoires) ; `to_c2` / `from_c2` / `wrap` (complément à deux) ; `pack` / `unpack` (bus de voies) ; `load_test_module(bloc)` pour réutiliser les bancs et modèles d'un autre bloc ; `run_tests()` ; `setup_matplotlib_fonts()`. |
-| [`layout.py`](layout.py) | Disposition des données en mémoire (D6), côté logiciel hôte : `w_image`, `x_image`, `y_addresses`, `y_from_words`. |
-| [`viz.py`](viz.py) | Palette et style des figures ; moteur de rendu rapide des animations : les jetons, cases et chiffres sont des tracés regroupés en collections (`Layer`, `TextLayer`, `TokenLayers`), redessinés avec le blitting. |
+| [`common.py`](common.py) | `Bench`: minimal py4hw system around a block (`step()` advances by one edge; `observe()` reads the outputs **during** the cycle, useful for combinational outputs); `to_c2` / `from_c2` / `wrap` (two's complement); `pack` / `unpack` (lane buses); `load_test_module(block)` to reuse the testbenches and models of another block; `run_tests()`; `setup_matplotlib_fonts()`. |
+| [`layout.py`](layout.py) | Data layout in memory (D6), on the host software side: `w_image`, `x_image`, `y_addresses`, `y_from_words`. |
+| [`viz.py`](viz.py) | Palette and style of the figures; fast rendering engine for the animations: tokens, cells and digits are paths grouped into collections (`Layer`, `TextLayer`, `TokenLayers`), redrawn with blitting. |
 
-Un fichier `test.py` d'un autre bloc se charge avec `load_test_module('<bloc>')` : un `import test` classique
-tomberait sur le module `test` de la bibliothèque standard de Python.
+The `test.py` file of another block is loaded with `load_test_module('<block>')`: a plain `import test` would pick up
+the `test` module of the Python standard library.
 
-## Bancs de test
+## Testbenches
 
-### Blocs unitaires
-| Dossier | Bloc testé | État |
+### Unit blocks
+| Folder | Block under test | Status |
 |---|---|---|
-| `pe/` | Un Processing Element (MAC, registres de passage, clear de l'accumulateur, chargement du poids) | ✅ |
-| `pe_array/` | Grille N×N de PE, sans le data_feeder (les flux sont injectés à la main selon le contrat de la spécification) | ✅ |
-| `data_feeder/` | Alignement, masquage et décalage en escalier des flux W et X ; chaîne data_feeder → pe_array | ✅ |
-| `output_drain/` | Vidage (OS), redressement et accumulation sur les tuiles de K (WS) ; cœur de calcul de bout en bout | ✅ |
-| `post_processing/` | Biais → ReLU → requantification → saturation ; chaîne complète jusqu'à l'écriture de Y, MLP à 2 couches | ✅ |
-| `weight_buffer/` | SRAM des poids ; disposition de W relue aux adresses du planificateur | ✅ |
-| `activation_buffer/` | SRAM des activations (bancs IN / OUT) ; chemin de données complet avec ses mémoires, piloté comme par l'hôte ; deux couches enchaînées | ✅ |
-| `controller/` | FSM identique cycle par cycle au planificateur de référence ; NPU complet sans `host_interface`, piloté par go / done ; carte de décision OS / WS | ✅ |
-| `host_interface/` | Décodage du bus, registres, impulsion go, DONE / irq, latence de lecture ; coût du bus sur la puce complète | ✅ |
+| `pe/` | A Processing Element (MAC, pass-through registers, accumulator clear, weight loading) | ✅ |
+| `pe_array/` | N×N array of PEs, without the data_feeder (the streams are injected by hand according to the contract of the specification) | ✅ |
+| `data_feeder/` | Alignment, masking and staircase skewing of the W and X streams; data_feeder → pe_array chain | ✅ |
+| `output_drain/` | Draining (OS), deskewing and accumulation over the K tiles (WS); end-to-end compute core | ✅ |
+| `post_processing/` | Bias → ReLU → requantization → saturation; complete chain up to the write of Y, 2-layer MLP | ✅ |
+| `weight_buffer/` | Weight SRAM; layout of W read back at the scheduler addresses | ✅ |
+| `activation_buffer/` | Activation SRAM (IN / OUT banks); complete datapath with its memories, driven as the host would; two chained layers | ✅ |
+| `controller/` | FSM identical cycle by cycle to the reference scheduler; complete NPU without `host_interface`, driven by go / done; OS / WS decision map | ✅ |
+| `host_interface/` | Bus decoding, registers, go pulse, DONE / irq, read latency; cost of the bus on the complete chip | ✅ |
 
-### Assemblages
-| Dossier | Contenu | État |
+### Assemblies
+| Folder | Contents | Status |
 |---|---|---|
-| `compute_core/` | Cœur de calcul : `data_feeder` + `pe_array` + `output_drain` | fichiers d'attente : le cœur est testé et mesuré dans `output_drain/` |
-| `npu_top/` | Puce complète pilotée uniquement par son bus : l'hôte écrit W, X et b, lance GO, attend DONE et relit Y | ✅ |
+| `compute_core/` | Compute core: `data_feeder` + `pe_array` + `output_drain` | placeholder files: the core is tested and measured in `output_drain/` |
+| `npu_top/` | Complete chip driven only through its bus: the host writes W, X and b, starts GO, waits for DONE and reads Y back | ✅ |
 
-`dma/` n'a pas de banc de test : ce bloc est prévu pour la v2.
+`dma/` has no testbench: this block is planned for v2.
 
-## Planificateur de référence du controller
+## Reference scheduler of the controller
 
-[`output_drain/test.py`](output_drain/test.py) contient `plan_os` et `plan_ws` : pour un GEMM donné, ils produisent
-cycle par cycle ce que la FSM du `controller` doit émettre (mots lus en SRAM, masques, `clear` / `load`, commandes de
-vidage ou sideband, tags, phase), selon [`src/controller/interface.md`](../src/controller/interface.md).
-`core(variant, post=False, mem=False, ctrl=False)` et `run_core(bench, plan)` exécutent le cœur de calcul complet avec
-ce plan (avec `post=True`, le `post_processing` est branché à la suite ; avec `mem=True`, les deux buffers aussi, et le
-plan émet des adresses au lieu de fournir les mots ; avec `ctrl=True`, le vrai `controller` remplace le plan), et `rebuild_y` reconstruit
-Y à partir des seuls résultats sortis. Ces fonctions serviront de référence pour tester le vrai `controller`.
+[`output_drain/test.py`](output_drain/test.py) contains `plan_os` and `plan_ws`: for a given GEMM, they produce cycle by
+cycle what the FSM of the `controller` must emit (words read from SRAM, masks, `clear` / `load`, drain commands or
+sideband, tags, phase), according to [`src/controller/interface.md`](../src/controller/interface.md).
+`core(variant, post=False, mem=False, ctrl=False)` and `run_core(bench, plan)` run the complete compute core with this
+plan (with `post=True`, the `post_processing` is plugged in after it; with `mem=True`, the two buffers as well, and the
+plan emits addresses instead of supplying the words; with `ctrl=True`, the real `controller` replaces the plan), and
+`rebuild_y` rebuilds Y from the results that come out alone. These functions will serve as the reference for testing
+the real `controller`.
 
-## Pilote hôte
+## Host driver
 
-[`activation_buffer/test.py`](activation_buffer/test.py) contient les fonctions qui pilotent le chemin de données
-complet comme le fera l'hôte : `datapath(variant)`, `load_wb`, `load_ab`, `read_ab`, `load_bias`, `copy_out_to_in` et
-`run_layer` (chargement, GEMM, relecture de Y ; avec `log=[]`, un journal de tous les accès mémoire, cycle par cycle).
-Avec le controller (`ctrl=True`), le GEMM est lancé par `run_go` : impulsion `go` avec les dimensions, puis attente
-de `done`.
+[`activation_buffer/test.py`](activation_buffer/test.py) contains the functions that drive the complete datapath as
+the host will: `datapath(variant)`, `load_wb`, `load_ab`, `read_ab`, `load_bias`, `copy_out_to_in` and `run_layer`
+(loading, GEMM, reading Y back; with `log=[]`, a log of all memory accesses, cycle by cycle).
+With the controller (`ctrl=True`), the GEMM is started by `run_go`: a `go` pulse with the dimensions, then waiting for
+`done`.
 
-## Logiciel hôte de référence
+## Reference host software
 
-[`npu_top/test.py`](npu_top/test.py) contient la classe `Npu` : elle pilote la puce complète uniquement par son bus de
-32 bits (`write`, `read`), comme le fera le vrai processeur hôte, avec la carte mémoire de `architecture.md` (D7) et la
-disposition des données de `layout.py` (D6) : `load_w`, `load_x`, `load_bias`, `configure`, `start`, `wait_done`,
-`read_y`, `copy_out_to_in`, et `gemm` qui enchaîne le tout pour une couche. [`npu_top/animation.py`](npu_top/animation.py)
-fournit `trace_puce`, qui relève l'activité de chaque bloc de la puce cycle par cycle.
-
+[`npu_top/test.py`](npu_top/test.py) contains the class `Npu`: it drives the complete chip only through its 32-bit bus
+(`write`, `read`), as the real host processor will, with the memory map of `architecture.md` (D7) and the data layout
+of `layout.py` (D6): `load_w`, `load_x`, `load_bias`, `configure`, `start`, `wait_done`, `read_y`, `copy_out_to_in`,
+and `gemm`, which chains everything together for one layer. [`npu_top/animation.py`](npu_top/animation.py) provides
+`trace_chip`, which records the activity of each block of the chip cycle by cycle.

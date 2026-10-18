@@ -1,14 +1,14 @@
 """
-Benchmark du weight_buffer : comment le cœur de calcul utilise la mémoire des poids.
+Benchmark of the weight_buffer: how the compute core uses the weight memory.
 
-Toutes les mesures viennent du chemin de données complet avec ses mémoires (voir test/activation_buffer/test.py) :
-l'hôte charge W et X, le cœur calcule, et chaque lecture du weight_buffer est comptée.
+All the measurements come from the complete datapath with its memories (see test/activation_buffer/test.py):
+the host loads W and X, the core computes, and each read of the weight_buffer is counted.
 
-  1. Nombre de lectures de W pour un GEMM D×D×D, comparé au minimum (chaque mot lu une fois)
-  2. Occupation du port de lecture pendant le calcul
-  3. et 4. Chronologie des lectures (adresse lue à chaque cycle), GEMM 16×16×16, OS puis WS
+  1. Number of reads of W for a D×D×D GEMM, compared with the minimum (each word read once)
+  2. Occupation of the read port during the computation
+  3. and 4. Timeline of the reads (address read at each cycle), 16×16×16 GEMM, OS then WS
 
-Lancement : python test/weight_buffer/benchmark.py [--save fichier.png]
+Run: python test/weight_buffer/benchmark.py [--save file.png]
 """
 
 import sys
@@ -33,32 +33,32 @@ def gemm_log(variant, D, seed=150):
     b = AB.datapath(variant)
     log = []
     AB.run_layer(b, variant, W, X, [0] * D, 1, 8, 0, log=log)
-    calcul = [e for e in log if e['phase'] == 'calcul']
-    return calcul
+    compute = [e for e in log if e['phase'] == 'compute']
+    return compute
 
 
-def mesure_lectures(Ds=(4, 8, 12, 16, 24, 32)):
-    res = {v: dict(lectures=[], occupation=[]) for v in ('OS', 'WS')}
+def measure_reads(Ds=(4, 8, 12, 16, 24, 32)):
+    res = {v: dict(reads=[], occupation=[]) for v in ('OS', 'WS')}
     for D in Ds:
         for v in ('OS', 'WS'):
-            calcul = gemm_log(v, D)
-            n = sum(e['w_rd'] is not None for e in calcul)
-            res[v]['lectures'].append(n)
-            res[v]['occupation'].append(100 * n / len(calcul))
+            compute = gemm_log(v, D)
+            n = sum(e['w_rd'] is not None for e in compute)
+            res[v]['reads'].append(n)
+            res[v]['occupation'].append(100 * n / len(compute))
     minimum = [len(layout.w_image(np.zeros((D, D), int))) for D in Ds]
     return list(Ds), res, minimum
 
 
-def plot_lectures(ax, data):
+def plot_reads(ax, data):
     Ds, res, minimum = data
-    ax.plot(Ds, minimum, color=REF, lw=4, alpha=0.35, label='minimum : chaque mot lu une fois (= WS)')
+    ax.plot(Ds, minimum, color=REF, lw=4, alpha=0.35, label='minimum: each word read once (= WS)')
     for v, color in (('OS', C_OS), ('WS', C_WS)):
-        ax.plot(Ds, res[v]['lectures'], 'o-', color=color, mec=SURFACE, mew=2, label=v)
+        ax.plot(Ds, res[v]['reads'], 'o-', color=color, mec=SURFACE, mew=2, label=v)
     ax.set_yscale('log')
     ax.set_xticks(Ds)
-    ax.set_xlabel('taille du GEMM D (D×D×D)')
-    ax.set_ylabel('lectures du weight_buffer')
-    ax.set_title('1. Lectures de W par GEMM', loc='left')
+    ax.set_xlabel('GEMM size D (D×D×D)')
+    ax.set_ylabel('weight_buffer reads')
+    ax.set_title('1. Reads of W per GEMM', loc='left')
     ax.legend(loc='upper left')
 
 
@@ -70,21 +70,21 @@ def plot_occupation(ax, data):
                     textcoords='offset points', va='center', fontsize=8, color=TEXT)
     ax.set_ylim(0, 100)
     ax.set_xticks(Ds)
-    ax.set_xlabel('taille du GEMM D (D×D×D)')
-    ax.set_ylabel('cycles de calcul avec une lecture (%)')
-    ax.set_title('2. Occupation du port de lecture pendant le calcul', loc='left')
+    ax.set_xlabel('GEMM size D (D×D×D)')
+    ax.set_ylabel('compute cycles with a read (%)')
+    ax.set_title('2. Occupation of the read port during the computation', loc='left')
     ax.legend(loc='center right')
 
 
-def chronologie(variant, D=16):
-    """(cycle, adresse linéaire t·D + k) de chaque lecture de W pendant le calcul."""
-    calcul = gemm_log(variant, D)
+def timeline(variant, D=16):
+    """(cycle, linear address t·D + k) of each read of W during the computation."""
+    compute = gemm_log(variant, D)
     pts = [(c, (e['w_rd'] >> layout.IW) * D + (e['w_rd'] & ((1 << layout.IW) - 1)))
-           for c, e in enumerate(calcul) if e['w_rd'] is not None]
-    return pts, len(calcul), D
+           for c, e in enumerate(compute) if e['w_rd'] is not None]
+    return pts, len(compute), D
 
 
-def plot_chronologie(ax, data, variant, color, xmax):
+def plot_timeline(ax, data, variant, color, xmax):
     pts, n, D = data
     c, a = zip(*pts)
     ax.scatter(c, a, s=5, color=color, lw=0)
@@ -94,41 +94,41 @@ def plot_chronologie(ax, data, variant, color, xmax):
     ax.set_ylim(-1, layout.tiles(D) * D)
     ax.set_yticks([t * D + D / 2 for t in range(layout.tiles(D))])
     ax.set_yticklabels([f'i_t = {t}' for t in range(layout.tiles(D))])
-    ax.set_xlabel('cycle de calcul')
-    ax.set_title(f'{3 if variant == "OS" else 4}. Lectures de W au fil du calcul, GEMM {D}³ — {variant} '
-                 f'({len(pts)} lectures)', loc='left')
+    ax.set_xlabel('compute cycle')
+    ax.set_title(f'{3 if variant == "OS" else 4}. Reads of W during the computation, {D}³ GEMM — {variant} '
+                 f'({len(pts)} reads)', loc='left')
     ax.grid(axis='y', visible=False)
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--save', help='enregistre la figure (png) au lieu de l\'afficher')
+    ap.add_argument('--save', help='saves the figure (png) instead of showing it')
     args = ap.parse_args()
 
-    print('lectures de W en fonction de la taille du GEMM...')
-    lec = mesure_lectures()
-    print('chronologie des lectures...')
-    ch_os, ch_ws = chronologie('OS'), chronologie('WS')
+    print('reads of W as a function of the GEMM size...')
+    rd = measure_reads()
+    print('timeline of the reads...')
+    ch_os, ch_ws = timeline('OS'), timeline('WS')
 
-    Ds, res, minimum = lec
-    print('\nRésumé')
+    Ds, res, minimum = rd
+    print('\nSummary')
     for v in ('OS', 'WS'):
-        print(f'  {v} : lectures ' + ', '.join(f'D={d} {n} ({n / mn:.1f}× le minimum)'
-                                             for d, n, mn in zip(Ds, res[v]['lectures'], minimum)))
-        print(f'       occupation du port ' + ', '.join(f'D={d} {o:.0f} %' for d, o in zip(Ds, res[v]['occupation'])))
+        print(f'  {v}: reads ' + ', '.join(f'D={d} {n} ({n / mn:.1f}× the minimum)'
+                                             for d, n, mn in zip(Ds, res[v]['reads'], minimum)))
+        print(f'      port occupation ' + ', '.join(f'D={d} {o:.0f} %' for d, o in zip(Ds, res[v]['occupation'])))
 
     fig, axs = plt.subplots(2, 2, figsize=(14, 9.5))
-    plot_lectures(axs[0, 0], lec)
-    plot_occupation(axs[0, 1], lec)
+    plot_reads(axs[0, 0], rd)
+    plot_occupation(axs[0, 1], rd)
     xmax = max(ch_os[1], ch_ws[1])
-    plot_chronologie(axs[1, 0], ch_os, 'OS', C_OS, xmax)
-    plot_chronologie(axs[1, 1], ch_ws, 'WS', C_WS, xmax)
-    fig.suptitle('Benchmark du weight_buffer — accès du cœur de calcul à la mémoire des poids', fontsize=13,
+    plot_timeline(axs[1, 0], ch_os, 'OS', C_OS, xmax)
+    plot_timeline(axs[1, 1], ch_ws, 'WS', C_WS, xmax)
+    fig.suptitle('weight_buffer benchmark — accesses of the compute core to the weight memory', fontsize=13,
                  fontweight='bold', color=TEXT)
     fig.tight_layout()
     if args.save:
         fig.savefig(args.save, dpi=120)
-        print(f'\nfigure enregistrée : {args.save}')
+        print(f'\nfigure saved: {args.save}')
     else:
         plt.show()
 

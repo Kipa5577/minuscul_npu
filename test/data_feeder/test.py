@@ -1,15 +1,15 @@
 """
-Test fonctionnel du data_feeder (spécification : src/data_feeder/interface.md).
+Functional test of the data_feeder (specification: src/data_feeder/interface.md).
 
-  - latences : la voie l d'un flux décalé sort 1 + l cycles après l'émission ; W en WS et ctl après 1 cycle
-  - masquage : les voies hors limites sortent à 0, quel que soit le contenu de la mémoire
-  - comparaison cycle par cycle avec un modèle de référence
-  - chaîne data_feeder → pe_array : GEMM complet avec dimensions non multiples de N et mémoire « sale »
+  - latencies: lane l of a skewed stream comes out 1 + l cycles after emission; W in WS and ctl after 1 cycle
+  - masking: out-of-bounds lanes come out as 0, whatever the contents of the memory
+  - cycle-by-cycle comparison with a reference model
+  - data_feeder → pe_array chain: complete GEMM with dimensions that are not multiples of N and "dirty" memory
 
-Convention de temps : le controller émet (masques, ctl, adresse) au cycle e ; la SRAM rend le mot au cycle e + 1.
-Les sorties sont lues PENDANT chaque cycle (Bench.observe), car la voie 0 est combinatoire.
+Timing convention: the controller emits (masks, ctl, address) at cycle e; the SRAM returns the word at cycle e + 1.
+The outputs are read DURING each cycle (Bench.observe), because lane 0 is combinational.
 
-Lancement : python test/data_feeder/test.py
+Run: python test/data_feeder/test.py
 """
 
 import sys
@@ -27,7 +27,7 @@ DW, AW = 8, 32
 VARIANTS = {'OS': DataFeeder_OS, 'WS': DataFeeder_WS}
 
 
-# --- Banc ---------------------------------------------------------------------------------
+# --- Bench --------------------------------------------------------------------------------
 
 def bench(variant='OS', N=4):
     cls = VARIANTS[variant]
@@ -44,8 +44,8 @@ def bench(variant='OS', N=4):
 
 def run(b, emissions, extra=8):
     """
-    emissions[e] = dict(w=[...], x=[...], w_mask=int, x_mask=int, ctl=int) émis au cycle e.
-    La SRAM rend le mot de l'émission e au cycle e + 1. Renvoie les sorties lues pendant chaque cycle.
+    emissions[e] = dict(w=[...], x=[...], w_mask=int, x_mask=int, ctl=int) emitted at cycle e.
+    The SRAM returns the word of emission e at cycle e + 1. Returns the outputs read during each cycle.
     """
     N = b.N
     idle = dict(w=[0] * N, x=[0] * N, w_mask=0, x_mask=0, ctl=0)
@@ -64,7 +64,7 @@ def mask_of(n_valid, N):
     return (1 << max(0, min(n_valid, N))) - 1
 
 
-# --- Modèle de référence ---------------------------------------------------------------------
+# --- Reference model -------------------------------------------------------------------------
 
 class RefFeeder:
     def __init__(self, N, skew_w):
@@ -74,7 +74,7 @@ class RefFeeder:
         self.xc = [[0] * l for l in range(N)]
 
     def cycle(self, w_rdata, x_rdata, w_mask, x_mask, ctl):
-        """Renvoie les sorties pendant le cycle, puis met à jour l'état (front)."""
+        """Returns the outputs during the cycle, then updates the state (edge)."""
         N = self.N
         wmk = [w_rdata[l] if (self.wm >> l) & 1 else 0 for l in range(N)]
         xmk = [x_rdata[l] if (self.xm >> l) & 1 else 0 for l in range(N)]
@@ -99,7 +99,7 @@ def test_reset():
         assert snap['w_arr'] == 0 and snap['x_arr'] == 0 and snap['ctl_arr'] == 0, v
 
 
-def test_latence_par_voie():
+def test_latency_per_lane():
     word = [11, -22, 33, -44]
     for v in VARIANTS:
         for N in (1, 2, 4, 8):
@@ -110,12 +110,12 @@ def test_latence_par_voie():
                 lat_x = 1 + l
                 lat_w = 1 + l if v == 'OS' else 1
                 for c, snap in enumerate(h):
-                    assert snap['x'][l] == (w[l] if c == lat_x else 0), f'{v} N={N} X voie {l} cycle {c}'
-                    assert snap['w'][l] == (w[l] if c == lat_w else 0), f'{v} N={N} W voie {l} cycle {c}'
+                    assert snap['x'][l] == (w[l] if c == lat_x else 0), f'{v} N={N} X lane {l} cycle {c}'
+                    assert snap['w'][l] == (w[l] if c == lat_w else 0), f'{v} N={N} W lane {l} cycle {c}'
             assert [s['ctl'] for s in h[:3]] == [0, 1, 0], v
 
 
-def test_masquage():
+def test_masking():
     garbage = [101, -102, 103, -104]
     for v in VARIANTS:
         for wm, xm in [(0b0101, 0b1010), (0b0111, 0b0001), (0, 0), (0b1111, 0b1111)]:
@@ -125,18 +125,18 @@ def test_masquage():
                 lat_w = 1 + l if v == 'OS' else 1
                 exp_w = garbage[l] if (wm >> l) & 1 else 0
                 exp_x = garbage[l] if (xm >> l) & 1 else 0
-                assert h[lat_w]['w'][l] == exp_w, f'{v} W voie {l} masque {wm:04b}'
-                assert h[1 + l]['x'][l] == exp_x, f'{v} X voie {l} masque {xm:04b}'
+                assert h[lat_w]['w'][l] == exp_w, f'{v} W lane {l} mask {wm:04b}'
+                assert h[1 + l]['x'][l] == exp_x, f'{v} X lane {l} mask {xm:04b}'
 
 
-def test_repos_injecte_des_zeros():
+def test_idle_injects_zeros():
     for v in VARIANTS:
         b = bench(v)
         h = run(b, [dict(w=[7, 7, 7, 7], x=[7, 7, 7, 7], w_mask=0, x_mask=0, ctl=0)] * 10)
         assert all(s['w'] == [0] * 4 and s['x'] == [0] * 4 for s in h), v
 
 
-def test_aleatoire_cycle_par_cycle():
+def test_random_cycle_by_cycle():
     for v in VARIANTS:
         random.seed(30)
         N = 4
@@ -151,7 +151,7 @@ def test_aleatoire_cycle_par_cycle():
             assert got == exp, f'{v} cycle {b.cycle}: {got} ≠ {exp}'
 
 
-# --- Chaîne data_feeder → pe_array -------------------------------------------------------------
+# --- data_feeder → pe_array chain --------------------------------------------------------------
 
 def chain(variant, N=4):
     feeder, array = (DataFeeder_OS, PE_Array_OS) if variant == 'OS' else (DataFeeder_WS, PE_Array_WS)
@@ -186,13 +186,13 @@ def run_chain(b, emissions, extra):
     return hist
 
 
-def test_chaine_os_gemm_bords_et_memoire_sale():
+def test_chain_os_gemm_edges_and_dirty_memory():
     rng = np.random.default_rng(31)
     N = 4
     for M, K, Nd in [(4, 6, 4), (3, 5, 2), (1, 1, 1), (2, 9, 3)]:
         W = rng.integers(-128, 128, (M, K))
         X = rng.integers(-128, 128, (K, Nd))
-        # mots mémoire : voies hors limites remplies de valeurs non nulles (mémoire « sale »)
+        # memory words: out-of-bounds lanes filled with non-zero values ("dirty" memory)
         Wm = rng.integers(-128, 128, (N, K))
         Xm = rng.integers(-128, 128, (K, N))
         Wm[:M], Xm[:, :Nd] = W, X
@@ -202,10 +202,10 @@ def test_chaine_os_gemm_bords_et_memoire_sale():
         h = run_chain(chain('OS', N), em, extra=3 * N)
         acc = np.array(unpack(h[-1], N * N, AW)).reshape(N, N)
         assert (acc[:M, :Nd] == W @ X).all(), f'M={M} K={K} N={Nd}'
-        assert not acc[M:].any() and not acc[:, Nd:].any(), 'les PE hors limites doivent rester à 0'
+        assert not acc[M:].any() and not acc[:, Nd:].any(), 'out-of-bounds PEs must stay at 0'
 
 
-def test_chaine_ws_gemm_bords_et_memoire_sale():
+def test_chain_ws_gemm_edges_and_dirty_memory():
     rng = np.random.default_rng(32)
     N = 4
     for M, K, J in [(4, 4, 6), (3, 2, 5), (1, 1, 1), (2, 3, 7)]:
@@ -214,15 +214,15 @@ def test_chaine_ws_gemm_bords_et_memoire_sale():
         Wm = rng.integers(-128, 128, (N, N))
         Xm = rng.integers(-128, 128, (N, J))
         Wm[:M, :K], Xm[:K] = W, X
-        # préchargement : on présente la ligne de grille k = N−1 en premier
+        # preload: array row k = N−1 is presented first
         em = [dict(w=list(Wm[:, k]), x=[0] * N, w_mask=mask_of(M, N) if k < K else 0, x_mask=0, ctl=1)
               for k in reversed(range(N))]
         em += [dict(w=[0] * N, x=list(Xm[:, j]), w_mask=0, x_mask=mask_of(K, N), ctl=0) for j in range(J)]
         h = run_chain(chain('WS', N), em, extra=3 * N)
-        s0 = N                                    # cycle d'émission de la colonne j = 0
+        s0 = N                                    # emission cycle of column j = 0
         Y = np.array([[unpack(h[s0 + 1 + j + i + N - 1], N, AW)[i] for j in range(J)] for i in range(N)])
         assert (Y[:M] == W @ X).all(), f'M={M} K={K} J={J}'
-        assert not Y[M:].any(), 'les colonnes de grille hors limites doivent sortir 0'
+        assert not Y[M:].any(), 'out-of-bounds array columns must output 0'
 
 
 if __name__ == '__main__':

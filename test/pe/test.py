@@ -1,10 +1,10 @@
 """
-Test fonctionnel du pe (spécification : src/pe/interface.md).
+Functional test of the pe (specification: src/pe/interface.md).
 
-Chaque variante est comparée, cycle par cycle, à un modèle de référence Python
-écrit directement depuis la spécification.
+Each variant is compared, cycle by cycle, with a Python reference model
+written directly from the specification.
 
-Lancement : python test/pe/test.py
+Run: python test/pe/test.py
 """
 
 import sys
@@ -18,7 +18,7 @@ import numpy as np
 from src.pe.pe import PE_OS, PE_WS
 
 
-# --- Modèles de référence -------------------------------------------------------
+# --- Reference models ----------------------------------------------------------
 
 class RefPE_OS:
     def __init__(self, DW=8, AW=32):
@@ -45,7 +45,7 @@ class RefPE_WS:
         if not rst_n:
             self.w_r = self.x_r = self.psum = 0
             return
-        self.psum = wrap(psum_in + self.w_r * x_in, self.AW)    # ancien poids
+        self.psum = wrap(psum_in + self.w_r * x_in, self.AW)    # old weight
         if load:
             self.w_r = w_load_in
         self.x_r = x_in
@@ -54,7 +54,7 @@ class RefPE_WS:
         return {'x_out': self.x_r, 'psum_out': self.psum, 'w_load_out': self.w_r}
 
 
-# --- Bancs -----------------------------------------------------------------------
+# --- Benches ---------------------------------------------------------------------
 
 def bench_os(DW=8, AW=32):
     b = Bench(
@@ -82,10 +82,10 @@ def bench_ws(DW=8, AW=32):
 
 def check(b, ref, ctx=''):
     got = {n: b.get(n) for n in ref.outputs()}
-    assert got == ref.outputs(), f'cycle {b.cycle} {ctx}: matériel {got} ≠ référence {ref.outputs()}'
+    assert got == ref.outputs(), f'cycle {b.cycle} {ctx}: hardware {got} ≠ reference {ref.outputs()}'
 
 
-# --- Tests OS ----------------------------------------------------------------------
+# --- OS tests ----------------------------------------------------------------------
 
 def test_os_reset():
     b = bench_os()
@@ -96,7 +96,7 @@ def test_os_reset():
     assert (b.get('w_out'), b.get('x_out'), b.get('acc')) == (0, 0, 0)
 
 
-def test_os_latence_passage():
+def test_os_pass_through_latency():
     b = bench_os()
     b.step(w_in=42, x_in=-17, clear=0)
     assert (b.get('w_out'), b.get('x_out')) == (42, -17)          # L = 1
@@ -104,7 +104,7 @@ def test_os_latence_passage():
     assert (b.get('w_out'), b.get('x_out')) == (0, 0)
 
 
-def test_os_produit_scalaire():
+def test_os_dot_product():
     rng = np.random.default_rng(1)
     w = rng.integers(-128, 128, 64)
     x = rng.integers(-128, 128, 64)
@@ -115,17 +115,17 @@ def test_os_produit_scalaire():
     assert b.get('acc') == int(np.dot(w, x))
 
 
-def test_os_clear_prioritaire():
+def test_os_clear_has_priority():
     b = bench_os()
     for _ in range(3):
         b.step(w_in=10, x_in=10, clear=0)
-    b.step(w_in=10, x_in=10, clear=1)            # le produit de ce cycle est perdu
+    b.step(w_in=10, x_in=10, clear=1)            # the product of this cycle is lost
     assert b.get('acc') == 0
     b.step(w_in=2, x_in=3, clear=0)
     assert b.get('acc') == 6
 
 
-def test_os_zero_neutre():
+def test_os_zero_is_neutral():
     b = bench_os()
     b.step(w_in=5, x_in=5, clear=0)
     for w, x in [(0, 99), (-77, 0), (0, 0)]:
@@ -141,7 +141,7 @@ def test_os_extremes_int8():
         assert b.get('acc') == 10 * w * x, (w, x)
 
 
-def test_os_aleatoire():
+def test_os_random():
     random.seed(2)
     b, ref = bench_os(), RefPE_OS()
     for _ in range(2000):
@@ -153,7 +153,7 @@ def test_os_aleatoire():
         check(b, ref, v)
 
 
-def test_os_parametres():
+def test_os_parameters():
     for DW, AW in [(4, 8), (4, 16), (16, 40)]:
         random.seed(DW * 100 + AW)
         b, ref = bench_os(DW, AW), RefPE_OS(DW, AW)
@@ -166,15 +166,15 @@ def test_os_parametres():
             check(b, ref, f'DW={DW} AW={AW}')
 
 
-def test_os_debordement_boucle():
-    # avec DW=4, AW=8 : (-8)·(-8) = 64, le 2e cycle donne 128 → -128 (modulo 2^8)
+def test_os_overflow_wraps():
+    # with DW=4, AW=8: (-8)·(-8) = 64, the 2nd cycle gives 128 → -128 (modulo 2^8)
     b = bench_os(4, 8)
     b.step(w_in=-8, x_in=-8, clear=0)
     b.step(w_in=-8, x_in=-8)
     assert b.get('acc') == -128
 
 
-# --- Tests WS ----------------------------------------------------------------------
+# --- WS tests ----------------------------------------------------------------------
 
 def test_ws_reset():
     b = bench_ws()
@@ -184,22 +184,22 @@ def test_ws_reset():
     assert (b.get('x_out'), b.get('psum_out'), b.get('w_load_out')) == (0, 0, 0)
 
 
-def test_ws_latence_passage():
+def test_ws_pass_through_latency():
     b = bench_ws()
     b.step(x_in=-99, load=0)
     assert b.get('x_out') == -99
 
 
-def test_ws_chargement_et_maintien():
+def test_ws_load_and_hold():
     b = bench_ws()
     b.step(w_load_in=-37, load=1)
     assert b.get('w_load_out') == -37
-    for v in (12, -5, 127):                     # load = 0 : le poids est conservé
+    for v in (12, -5, 127):                     # load = 0: the weight is kept
         b.step(w_load_in=v, load=0)
         assert b.get('w_load_out') == -37
 
 
-def test_ws_somme_partielle():
+def test_ws_partial_sum():
     b = bench_ws()
     b.step(w_load_in=-6, load=1)
     for x, p in [(7, 1000), (-128, -5), (0, 42), (127, 0)]:
@@ -208,27 +208,27 @@ def test_ws_somme_partielle():
         assert b.get('x_out') == x
 
 
-def test_ws_load_utilise_ancien_poids():
+def test_ws_load_uses_old_weight():
     b = bench_ws()
     b.step(w_load_in=2, load=1)
-    b.step(x_in=10, psum_in=0, w_load_in=9, load=1)   # chargement de 9 pendant ce cycle
-    assert b.get('psum_out') == 20                    # produit calculé avec l'ancien poids 2
+    b.step(x_in=10, psum_in=0, w_load_in=9, load=1)   # 9 is loaded during this cycle
+    assert b.get('psum_out') == 20                    # product computed with the old weight 2
     b.step(x_in=10, psum_in=0, load=0)
     assert b.get('psum_out') == 90
 
 
-def test_ws_debordement_boucle():
+def test_ws_overflow_wraps():
     b = bench_ws()
     b.step(w_load_in=1, load=1)
     b.step(x_in=1, psum_in=(1 << 31) - 1, load=0)
     assert b.get('psum_out') == -(1 << 31)
 
 
-def test_ws_colonne_de_4():
-    # 4 PE empilés à la main : la colonne calcule Σ_k W[k]·X[k] avec un décalage d'un cycle par ligne
+def test_ws_column_of_4():
+    # 4 PEs stacked by hand: the column computes Σ_k W[k]·X[k] with a one-cycle skew per row
     rng = np.random.default_rng(3)
     W = rng.integers(-128, 128, 4)
-    X = rng.integers(-128, 128, (4, 10))     # 10 colonnes j
+    X = rng.integers(-128, 128, (4, 10))     # 10 columns j
     pes = [bench_ws() for _ in range(4)]
     for k in range(4):
         pes[k].step(w_load_in=int(W[k]), load=1)
@@ -237,7 +237,7 @@ def test_ws_colonne_de_4():
     for t in range(10 + 4):
         new = []
         for k in range(4):
-            j = t - k                              # la ligne k reçoit X[k][j] au cycle j + k
+            j = t - k                              # row k receives X[k][j] at cycle j + k
             x = int(X[k][j]) if 0 <= j < 10 else 0
             p_in = psums[k - 1] if k > 0 else 0
             pes[k].step(x_in=x, psum_in=p_in, load=0)
@@ -248,7 +248,7 @@ def test_ws_colonne_de_4():
     assert out[:10] == [int(np.dot(W, X[:, j])) for j in range(10)]
 
 
-def test_ws_aleatoire():
+def test_ws_random():
     random.seed(4)
     b, ref = bench_ws(), RefPE_WS()
     for _ in range(2000):
@@ -260,7 +260,7 @@ def test_ws_aleatoire():
         check(b, ref, v)
 
 
-def test_ws_parametres():
+def test_ws_parameters():
     for DW, AW in [(4, 8), (16, 40)]:
         random.seed(DW * 10 + AW)
         b, ref = bench_ws(DW, AW), RefPE_WS(DW, AW)

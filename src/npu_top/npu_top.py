@@ -1,15 +1,15 @@
 """
-npu_top — Assemblage du NPU (spécification : src/npu_top/interface.md)
+npu_top — NPU assembly (specification: src/npu_top/interface.md)
 
-Le seul bloc visible de l'extérieur : un bus parallèle de 32 bits et une ligne d'interruption.
-Il instancie et câble tous les autres blocs, sans logique propre :
+The only block visible from the outside: a 32-bit parallel bus and an interrupt line.
+It instantiates and wires all the other blocks, with no logic of its own:
 
-  host_interface ──► controller, post_processing (configuration), mémoires (ports hôte)
-  controller ──► weight_buffer / activation_buffer (lectures), data_feeder, output_drain
+  host_interface ──► controller, post_processing (configuration), memories (host ports)
+  controller ──► weight_buffer / activation_buffer (reads), data_feeder, output_drain
   weight_buffer, activation_buffer ──► data_feeder ──► pe_array ──► output_drain ──► post_processing
-  post_processing ──► activation_buffer (écriture de Y)
+  post_processing ──► activation_buffer (write of Y)
 
-DATAFLOW ('OS' ou 'WS') choisit la variante du cœur de calcul. La v1 impose N = 4 (mot de 32 bits sur le bus).
+DATAFLOW ('OS' or 'WS') selects the variant of the compute core. v1 requires N = 4 (32-bit word on the bus).
 """
 
 from py4hw import Logic, Wire
@@ -48,19 +48,19 @@ class NpuTop(Logic):
         TAG_W = BAW + N + IW
         w = lambda name, width=1: self.wire(name, width)
 
-        # configuration et statut
+        # configuration and status
         dim_m, dim_k, dim_n = w('dim_m', IW + 1), w('dim_k', IW + 1), w('dim_n', IW + 1)
         req_mult, req_shift, relu_en = w('req_mult', 16), w('req_shift', 5), w('relu_en')
         go, busy, done, cycles = w('go'), w('busy'), w('done'), w('cycles', 32)
-        # ports hôte des mémoires
+        # host ports of the memories
         host_wdata = w('host_wdata', 32)
         wb_addr, wb_we, wb_re, wb_rdata = w('wb_addr', BAW), w('wb_we'), w('wb_re'), w('wb_rdata', 32)
         ab_addr, ab_we, ab_re, ab_rdata = w('ab_addr', BAW + 1), w('ab_we'), w('ab_re'), w('ab_rdata', 32)
         bias_addr, bias_we, bias_re, bias_rdata = w('bias_addr', IW), w('bias_we'), w('bias_re'), w('bias_rdata', AW)
-        # commandes du controller
+        # controller commands
         w_addr, w_re, x_addr, x_re = w('w_addr', BAW), w('w_re'), w('x_addr', BAW), w('x_re')
         w_mask, x_mask, ctl, tag = w('w_mask', N), w('x_mask', N), w('ctl'), w('tag', TAG_W)
-        # chemin de données
+        # datapath
         w_rdata, x_rdata = w('w_rdata', N * DW), w('x_rdata', N * DW)
         w_arr, x_arr, ctl_arr = w('w_arr', N * DW), w('x_arr', N * DW), w('ctl_arr')
         res, res_valid, tag_out = w('res', N * AW), w('res_valid'), w('tag_out', TAG_W)

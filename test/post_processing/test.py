@@ -1,15 +1,15 @@
 """
-Test fonctionnel du post_processing (spécification : src/post_processing/interface.md).
+Functional test of the post_processing (specification: src/post_processing/interface.md).
 
-  - latence exacte de 3 cycles et débit d'une entrée par cycle
-  - choix du biais : le même pour les N voies (OS), un par voie (WS)
-  - ReLU, arrondi au plus proche (demi vers +∞), saturation, débordement de l'addition du biais
-  - port hôte de la mémoire des biais (latence 1, inactif quand busy = 1)
-  - comparaison cycle par cycle avec un modèle de référence
-  - de bout en bout : data_feeder → pe_array → output_drain → post_processing sur des GEMM complets,
-    Y int8 reconstruit à partir des seules écritures (y_addr, y_wdata, y_wmask)
+  - exact latency of 3 cycles and throughput of one input per cycle
+  - choice of the bias: the same for the N lanes (OS), one per lane (WS)
+  - ReLU, round to nearest (half towards +∞), saturation, overflow of the bias addition
+  - host port of the bias memory (latency 1, inactive when busy = 1)
+  - cycle-by-cycle comparison with a reference model
+  - end to end: data_feeder → pe_array → output_drain → post_processing on complete GEMMs,
+    int8 Y rebuilt from the writes alone (y_addr, y_wdata, y_wmask)
 
-Lancement : python test/post_processing/test.py
+Run: python test/post_processing/test.py
 """
 
 import sys
@@ -22,14 +22,14 @@ from common import Bench, pack, unpack, load_test_module, run_tests
 import numpy as np
 from src.post_processing.post_processing import PostProcessing_OS, PostProcessing_WS
 
-OD = load_test_module('output_drain')            # cœur de calcul, planificateur, tags
+OD = load_test_module('output_drain')            # compute core, scheduler, tags
 DW, AW, IW, TAG_W = 8, 32, OD.IW, OD.TAG_W
 N = 4
 BAW = TAG_W - N - IW
 VARIANTS = {'OS': PostProcessing_OS, 'WS': PostProcessing_WS}
 
 
-# --- Banc unitaire ---------------------------------------------------------------------------------
+# --- Unit bench ------------------------------------------------------------------------------------
 
 def bench(variant='OS'):
     cls = VARIANTS[variant]
@@ -49,7 +49,7 @@ def bench(variant='OS'):
 
 
 def load_bias(b, biases):
-    """Écrit les biais par le port hôte (busy = 0), puis repasse busy à 1."""
+    """Writes the biases through the host port (busy = 0), then sets busy back to 1."""
     for i, v in enumerate(biases):
         b.step(busy=0, bias_host_addr=i, bias_host_wdata=int(v) & 0xFFFFFFFF, bias_host_we=1)
     b.step(busy=1, bias_host_we=0)
@@ -64,7 +64,7 @@ def tag(y_addr=0, mask=0b1111, row=0):
 
 
 def run_one(b, res, row=0, cfg=None):
-    """Envoie un seul vecteur, attend 3 cycles et renvoie les N octets écrits."""
+    """Sends a single vector, waits 3 cycles and returns the N bytes written."""
     b.step(res=pack(res, AW), res_valid=1, tag_in=tag(row=row), **(cfg or {}))
     b.step(res_valid=0)
     b.step()
@@ -72,10 +72,10 @@ def run_one(b, res, row=0, cfg=None):
     return y_lanes(b)
 
 
-# --- Modèle de référence ---------------------------------------------------------------------------------
+# --- Reference model -------------------------------------------------------------------------------------
 
 def requant(x, M, s, relu):
-    """Formule de la spécification, écrite indépendamment (division entière par défaut = arrondi vers −∞)."""
+    """Formula of the specification, written independently (floor integer division = rounding towards −∞)."""
     if relu:
         x = max(0, x)
     q = (x * M + (2 ** (s - 1) if s else 0)) // (2 ** s)
@@ -95,18 +95,18 @@ class RefPost:
     def step(self, res, valid, tag_in, M, s, relu):
         row = tag_in & ((1 << IW) - 1)
         b = [self.bias[(row + l) % 64 if self.per_lane else row] for l in range(N)]
-        entree = (valid, [wrap32(r + bb) for r, bb in zip(res, b)], tag_in)
-        # après le front de ce cycle, le registre de sortie contient l'entrée d'il y a 2 cycles
-        self.pipe = [entree] + self.pipe[:-1]
-        sortie = self.pipe[-1]
-        if sortie is None:
+        entry = (valid, [wrap32(r + bb) for r, bb in zip(res, b)], tag_in)
+        # after the edge of this cycle, the output register holds the input from 2 cycles ago
+        self.pipe = [entry] + self.pipe[:-1]
+        out = self.pipe[-1]
+        if out is None:
             return dict(we=0, mask=0)
-        v, a, t = sortie
+        v, a, t = out
         return dict(we=v, mask=((t >> IW) & 0xF) if v else 0, addr=t >> (IW + N),
                     y=[requant(x, M, s, relu) for x in a])
 
 
-# --- Tests unitaires --------------------------------------------------------------------------------------
+# --- Unit tests -------------------------------------------------------------------------------------------
 
 def test_reset():
     b = bench()
@@ -117,20 +117,20 @@ def test_reset():
     assert b.get('y_we') == 0 and b.get('y_wmask') == 0
 
 
-def test_latence_3_et_debit_1_par_cycle():
+def test_latency_3_and_throughput_1_per_cycle():
     for v in VARIANTS:
         b = bench(v)
         we = []
         for c in range(10):
-            # 4 vecteurs consécutifs aux cycles 0..3 ; res = c pour identifier le vecteur
+            # 4 consecutive vectors at cycles 0..3; res = c to identify the vector
             b.step(res=pack([c] * 4, AW), res_valid=int(c < 4), tag_in=tag(y_addr=c))
             we.append((b.get('y_we'), y_lanes(b)[0], b.get('y_addr')))
-        # entrée au cycle t → y_we pendant le cycle t + 3, c'est-à-dire après le pas d'indice t + 2
+        # input at cycle t → y_we during cycle t + 3, i.e. after the step of index t + 2
         assert [w[0] for w in we] == [0, 0, 1, 1, 1, 1, 0, 0, 0, 0], v
         assert [w[1] for w in we[2:6]] == [0, 1, 2, 3] and [w[2] for w in we[2:6]] == [0, 1, 2, 3], v
 
 
-def test_biais_os_diffuse_ws_par_voie():
+def test_bias_os_broadcast_ws_per_lane():
     biases = [10 * i - 300 for i in range(64)]
     b = bench('OS')
     load_bias(b, biases)
@@ -146,35 +146,35 @@ def test_relu():
     assert run_one(b, [-50, -1, 0, 50], cfg=dict(relu_en=0)) == [-50, -1, 0, 50]
 
 
-def test_arrondi_demi_vers_plus_infini():
+def test_rounding_half_towards_plus_infinity():
     b = bench()
-    cas = [(5, 1, 1, 3), (-5, 1, 1, -2), (3, 1, 1, 2), (-3, 1, 1, -1), (7, 1, 2, 2), (6, 1, 2, 2),
+    cases = [(5, 1, 1, 3), (-5, 1, 1, -2), (3, 1, 1, 2), (-3, 1, 1, -1), (7, 1, 2, 2), (6, 1, 2, 2),
            (-6, 1, 2, -1), (-7, 1, 2, -2), (100, 1, 0, 100), (1000, 3, 5, 94), (-1000, 3, 5, -94)]
-    for x, M, s, attendu in cas:
-        assert requant(x, M, s, False) == attendu, (x, M, s)
+    for x, M, s, expected in cases:
+        assert requant(x, M, s, False) == expected, (x, M, s)
         got = run_one(b, [x] * 4, cfg=dict(req_mult=M, req_shift=s, relu_en=0))
-        assert got == [attendu] * 4, (x, M, s, got)
+        assert got == [expected] * 4, (x, M, s, got)
 
 
-def test_saturation_et_valeurs_extremes():
+def test_saturation_and_extreme_values():
     b = bench()
     cfg = dict(relu_en=0)
-    for x, M, s, attendu in [(200, 1, 0, 127), (-200, 1, 0, -128), (2**31 - 1, 65535, 0, 127),
+    for x, M, s, expected in [(200, 1, 0, 127), (-200, 1, 0, -128), (2**31 - 1, 65535, 0, 127),
                              (-2**31, 65535, 0, -128), (2**31 - 1, 65535, 31, 127), (-2**31, 65535, 31, -128),
                              (2**31 - 1, 65535, 24, 127), (12345, 65535, 31, 0)]:
         got = run_one(b, [x] * 4, cfg=cfg | dict(req_mult=M, req_shift=s))
-        assert got == [requant(x, M, s, False)] * 4 == [attendu] * 4, (x, M, s, got)
+        assert got == [requant(x, M, s, False)] * 4 == [expected] * 4, (x, M, s, got)
 
 
-def test_biais_deborde_modulo_2_32():
+def test_bias_overflows_modulo_2_32():
     b = bench()
     load_bias(b, [1] * 64)
-    # (2^31 − 1) + 1 boucle sur −2^31 : la ReLU le met à 0
+    # (2^31 − 1) + 1 wraps around to −2^31: the ReLU sets it to 0
     assert run_one(b, [2**31 - 1] * 4, cfg=dict(relu_en=1)) == [0] * 4
     assert run_one(b, [2**31 - 1] * 4, cfg=dict(relu_en=0)) == [-128] * 4
 
 
-def test_adresse_et_masque():
+def test_address_and_mask():
     b = bench('WS')
     b.step(res=pack([1, 2, 3, 4], AW), res_valid=1, tag_in=tag(y_addr=0x2A5, mask=0b0101, row=8))
     b.step(res_valid=0)
@@ -182,23 +182,23 @@ def test_adresse_et_masque():
     b.step()
     assert (b.get('y_we'), b.get('y_addr'), b.get('y_wmask')) == (1, 0x2A5, 0b0101)
     b.step()
-    assert (b.get('y_we'), b.get('y_wmask')) == (0, 0), 'pas d\'écriture sans donnée valide'
+    assert (b.get('y_we'), b.get('y_wmask')) == (0, 0), 'no write without valid data'
 
 
-def test_port_hote_des_biais():
+def test_bias_host_port():
     b = bench()
     b.step(busy=0, bias_host_addr=9, bias_host_wdata=(-12345) & 0xFFFFFFFF, bias_host_we=1)
     b.step(busy=0, bias_host_addr=9, bias_host_we=0, bias_host_re=1)
     assert b.get('bias_host_rdata') == -12345                    # latence 1
-    # busy = 1 : le port hôte est inactif (ni lecture ni écriture)
+    # busy = 1: the host port is inactive (neither read nor write)
     b.step(busy=1, bias_host_addr=9, bias_host_wdata=777, bias_host_we=1, bias_host_re=0)
     b.step(busy=1, bias_host_addr=3, bias_host_we=0, bias_host_re=1)
-    assert b.get('bias_host_rdata') == -12345, 'lecture ignorée pendant busy'
+    assert b.get('bias_host_rdata') == -12345, 'read ignored during busy'
     b.step(busy=0, bias_host_addr=9, bias_host_re=1)
-    assert b.get('bias_host_rdata') == -12345, 'écriture ignorée pendant busy'
+    assert b.get('bias_host_rdata') == -12345, 'write ignored during busy'
 
 
-def test_aleatoire_cycle_par_cycle():
+def test_random_cycle_by_cycle():
     for v in VARIANTS:
         for run in range(4):
             rng = random.Random(100 * run + len(v))
@@ -219,12 +219,12 @@ def test_aleatoire_cycle_par_cycle():
                     assert b.get('y_addr') == exp['addr'] and y_lanes(b) == exp['y'], (v, b.cycle)
 
 
-# --- De bout en bout : cœur de calcul + post_processing ---------------------------------------------------
+# --- End to end: compute core + post_processing ------------------------------------------------------------
 
-def gemm_complet(variant, W, X, bias, M, s, relu, seed=0):
+def gemm_full(variant, W, X, bias, M, s, relu, seed=0):
     """
-    Exécute Y = requant(ReLU(W·X + b)) sur data_feeder → pe_array → output_drain → post_processing.
-    Renvoie (Y int8 reconstruit des écritures, nombre d'écritures par élément, liste des écritures).
+    Runs Y = requant(ReLU(W·X + b)) on data_feeder → pe_array → output_drain → post_processing.
+    Returns (int8 Y rebuilt from the writes, number of writes per element, list of the writes).
     """
     Mr, Nd = W.shape[0], X.shape[1]
     b = OD.core(variant, N, post=True)
@@ -256,7 +256,7 @@ def reference(W, X, bias, M, s, relu):
     return np.vectorize(lambda x: requant(int(x), M, s, relu))(acc)
 
 
-def test_bout_en_bout():
+def test_end_to_end():
     rng = np.random.default_rng(110)
     for variant in ('OS', 'WS'):
         for (Mr, K, Nd), relu in [((4, 4, 4), 1), ((5, 9, 7), 0), ((8, 16, 8), 1), ((10, 6, 3), 0)]:
@@ -264,19 +264,19 @@ def test_bout_en_bout():
             X = rng.integers(-128, 128, (K, Nd))
             bias = list(rng.integers(-20000, 20000, 64))
             M, s = int(rng.integers(1, 1 << 16)), int(rng.integers(14, 24))
-            Y, count, _ = gemm_complet(variant, W, X, bias, M, s, relu)
-            assert (count == 1).all(), f'{variant} {Mr}×{K}×{Nd} : écritures {count.tolist()}'
-            assert (Y == reference(W, X, bias, M, s, relu)).all(), f'{variant} {Mr}×{K}×{Nd} : Y faux'
+            Y, count, _ = gemm_full(variant, W, X, bias, M, s, relu)
+            assert (count == 1).all(), f'{variant} {Mr}×{K}×{Nd}: writes {count.tolist()}'
+            assert (Y == reference(W, X, bias, M, s, relu)).all(), f'{variant} {Mr}×{K}×{Nd}: wrong Y'
 
 
-def test_bout_en_bout_os_ws_identiques():
-    """Les deux variantes doivent écrire exactement le même Y."""
+def test_end_to_end_os_ws_identical():
+    """Both variants must write exactly the same Y."""
     rng = np.random.default_rng(111)
     W = rng.integers(-128, 128, (7, 12))
     X = rng.integers(-128, 128, (12, 9))
     bias = list(rng.integers(-5000, 5000, 64))
-    Y_os, _, _ = gemm_complet('OS', W, X, bias, 300, 12, 1)
-    Y_ws, _, _ = gemm_complet('WS', W, X, bias, 300, 12, 1)
+    Y_os, _, _ = gemm_full('OS', W, X, bias, 300, 12, 1)
+    Y_ws, _, _ = gemm_full('WS', W, X, bias, 300, 12, 1)
     assert (Y_os == Y_ws).all()
 
 

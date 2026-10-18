@@ -1,18 +1,18 @@
 """
-Animation du post_processing : le pipeline de 3 étages, cycle par cycle.
+Animation of the post_processing: the 3-stage pipeline, cycle by cycle.
 
-La chaîne complète data_feeder → pe_array → output_drain → post_processing calcule
-Y = requant(ReLU(W·X + b)) ; seul le post_processing est dessiné. Chaque voie est une ligne :
-  res (int32, depuis l'output_drain) → S1 : + biais → S2 : ReLU puis × M → S3 : arrondi, >> s, saturation
-puis écriture du mot de 4 octets dans le banc OUT de l'activation_buffer (les voies masquées ne sont pas écrites).
+The complete chain data_feeder → pe_array → output_drain → post_processing computes
+Y = requant(ReLU(W·X + b)); only the post_processing is drawn. Each lane is a row:
+  res (int32, from the output_drain) → S1: + bias → S2: ReLU then × M → S3: rounding, >> s, saturation
+then write of the 4-byte word into the OUT bank of the activation_buffer (masked lanes are not written).
 
-  - OS (en haut) : les 4 voies sont une même ligne de Y → un seul biais, le même pour les 4 voies
-  - WS (en bas)  : les 4 voies sont 4 lignes de Y       → un biais différent par voie
+  - OS (top)   : the 4 lanes are one and the same row of Y → a single bias, the same for the 4 lanes
+  - WS (bottom): the 4 lanes are 4 rows of Y                → a different bias per lane
 
-L'animation commence deux cycles avant le premier résultat de l'output_drain.
-Les valeurs sont celles de la simulation py4hw. Rendu ≥ 30 images/s (voir test/viz.py).
+The animation starts two cycles before the first result of the output_drain.
+The values are those of the py4hw simulation. Rendering ≥ 30 frames/s (see test/viz.py).
 
-Lancement : python test/post_processing/animation.py [--save fichier.gif] [--fps 30] [--cycle-ms 900]
+Run: python test/post_processing/animation.py [--save file.gif] [--fps 30] [--cycle-ms 900]
 """
 
 import sys
@@ -32,10 +32,10 @@ from matplotlib.animation import FuncAnimation, PillowWriter
 T = load_test_module('post_processing')
 OD = T.OD
 N, AW, DW, IW = T.N, T.AW, T.DW, T.IW
-H = 8                               # mots écrits affichés
+H = 8                               # written words shown
 EDGE = '#b9b8b2'
-C_Y = '#1baf7a'                     # octets int8 écrits
-CFG = dict(M=5, s=2, relu=1)        # y = sat(round(ReLU(acc + b) × 1,25))
+C_Y = '#1baf7a'                     # int8 bytes written
+CFG = dict(M=5, s=2, relu=1)        # y = sat(round(ReLU(acc + b) × 1.25))
 
 
 # --- Trace ---------------------------------------------------------------------------------------------
@@ -76,7 +76,7 @@ def describe(variant, tag):
     return (f'Y[{idx}, {N * t}–{N * t + N - 1}]' if variant == 'OS' else f'Y[{N * t}–{N * t + N - 1}, {idx}]'), mask
 
 
-# --- Panneau ---------------------------------------------------------------------------------------------
+# --- Panel -----------------------------------------------------------------------------------------------
 
 class Panel:
     X_IN, X_B, X_S1, X_S2, X_S3 = 0.0, 1.35, 2.75, 4.45, 6.15
@@ -88,15 +88,15 @@ class Panel:
         ax.set_ylim(N + 0.35, -1.85)
         ax.set_aspect('equal')
         ax.axis('off')
-        titre = ('output-stationary — 4 voies = une ligne de Y, un seul biais' if variant == 'OS'
-                 else 'weight-stationary — 4 voies = 4 lignes de Y, un biais par voie')
-        ax.text(-1.05, -1.6, titre, fontsize=12, fontweight='bold', color=color, va='center')
-        for x, lab in ((self.X_IN, 'res\n(int32)'), (self.X_B, 'biais'), (self.X_S1, 'S1\na = res + b'),
+        title = ('output-stationary — 4 lanes = one row of Y, a single bias' if variant == 'OS'
+                 else 'weight-stationary — 4 lanes = 4 rows of Y, one bias per lane')
+        ax.text(-1.05, -1.6, title, fontsize=12, fontweight='bold', color=color, va='center')
+        for x, lab in ((self.X_IN, 'res\n(int32)'), (self.X_B, 'bias'), (self.X_S1, 'S1\na = res + b'),
                        (self.X_S2, f'S2\nReLU, × {CFG["M"]}'), (self.X_S3, f'S3\n>> {CFG["s"]}, sat'),
-                       (self.X_MEM + (H - 1) * 0.95 / 2, 'activation_buffer — banc OUT (mots écrits)')):
+                       (self.X_MEM + (H - 1) * 0.95 / 2, 'activation_buffer — OUT bank (words written)')):
             ax.text(x, -0.85, lab, ha='center', va='center', fontsize=8, color=TEXT_2)
         for l in range(N):
-            ax.text(-0.85, l, f'v{l}', ha='center', va='center', fontsize=8, color=TEXT_2)
+            ax.text(-0.85, l, f'l{l}', ha='center', va='center', fontsize=8, color=TEXT_2)
             ax.plot([self.X_IN, self.X_S3], [l, l], color=GRID, lw=1, zorder=0)
             for x in (self.X_S1, self.X_S2, self.X_S3):
                 ax.add_patch(plt.Rectangle((x - 0.68, l - 0.32), 1.36, 0.64, fc=SURFACE, ec=EDGE, lw=1.1))
@@ -120,7 +120,7 @@ class Panel:
         e = ease(s / 0.45)
         M, sh = CFG['M'], CFG['s']
         if live:
-            # entrée : res et biais sélectionnés pendant ce cycle
+            # input: res and bias selected during this cycle
             valid, res, tag = r['inp']
             if valid:
                 for l in range(N):
@@ -130,7 +130,7 @@ class Panel:
                 idx = r['bias_idx']
                 lab = f'b[{idx[0]}]' if len(set(idx)) == 1 else f'b[{idx[0]}…{idx[-1]}]'
                 self.tag_txt.text(self.X_IN + 0.7, N - 0.35, f'{desc}   {lab}', TEXT_2, bold=False, pt=7)
-            # étages : la valeur de l'étage k vient de l'étage k − 1 au cycle précédent
+            # stages: the value of stage k comes from stage k − 1 in the previous cycle
             prev = recs[c - 1] if c > 0 else None
             for k, (key, x0, x1) in enumerate((('s1', self.X_IN, self.X_S1), ('s2', self.X_S1, self.X_S2),
                                                ('s3', self.X_S2, self.X_S3))):
@@ -140,7 +140,7 @@ class Panel:
                 for l in range(N):
                     x = x0 + (x1 - x0) * e
                     if key == 's3':
-                        # saturé si la valeur avant saturation (calculée depuis S2 au cycle précédent) sort de l'int8
+                        # saturated if the value before saturation (computed from S2 in the previous cycle) is outside int8
                         p = prev['s2'][1][l] if prev and prev['s2'][0] else 0
                         q = (p + ((1 << (sh - 1)) if sh else 0)) >> sh
                         sat = q > 127 or q < -128
@@ -154,21 +154,21 @@ class Panel:
                         self.wide(x, l, vals[l], CELL if clipped else C_P, TEXT_2 if clipped else TEXT, width=1.2)
                     else:
                         self.wide(x, l, vals[l], C_P, TEXT, width=1.2)
-        # mémoire : les mots écrits (y_we pendant le cycle → écrit au front)
-        ecrits = []
+        # memory: the words written (y_we during the cycle → written at the edge)
+        written = []
         for k in range(min(c + 1, len(recs))):
             v, y, tag = recs[k]['s3']
             if v and (k < c or s >= 0.5 or not live):
-                ecrits.append((y, tag))
+                written.append((y, tag))
         hv, hc = RECT
         for h in range(H):
-            k = len(ecrits) - H + h
+            k = len(written) - H + h
             x = self.X_MEM + h * 0.95
             if k < 0:
                 for l in range(N):
                     self.mem.add(hv * 0.84 + (x, l), hc, CELL)
                 continue
-            y, tag = ecrits[k]
+            y, tag = written[k]
             desc, mask = describe(self.variant, tag)
             for l in range(N):
                 on = (mask >> l) & 1
@@ -181,14 +181,14 @@ class Panel:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--save', help='enregistre l\'animation (gif) au lieu de l\'afficher')
-    ap.add_argument('--fps', type=int, default=30, help='images par seconde')
-    ap.add_argument('--cycle-ms', type=int, default=900, help='durée d\'un cycle d\'horloge à l\'écran (ms)')
+    ap.add_argument('--save', help='saves the animation (gif) instead of showing it')
+    ap.add_argument('--fps', type=int, default=30, help='frames per second')
+    ap.add_argument('--cycle-ms', type=int, default=900, help='on-screen duration of one clock cycle (ms)')
     args = ap.parse_args()
     SUB = max(1, round(args.fps * args.cycle_ms / 1000))
 
-    rec_os, ref_os = capture('OS', Mr=4, K=4, Nd=3, seed=8)     # voie 3 masquée (j = 3 ≥ N)
-    rec_ws, ref_ws = capture('WS', Mr=3, K=4, Nd=8, seed=9)     # voie 3 masquée (i = 3 ≥ M)
+    rec_os, ref_os = capture('OS', Mr=4, K=4, Nd=3, seed=8)     # lane 3 masked (j = 3 ≥ N)
+    rec_ws, ref_ws = capture('WS', Mr=3, K=4, Nd=8, seed=9)     # lane 3 masked (i = 3 ≥ M)
     n_cycles = max(len(rec_os), len(rec_ws)) + 2
     n_frames = n_cycles * SUB
 
@@ -200,14 +200,14 @@ def main():
     title = title_axes(fig, (0, 0.95, 1, 0.05)).text(0.5, 0.75, '', ha='center', va='top', fontsize=14,
                                                       fontweight='bold', color=TEXT, animated=True)
     fig.text(0.5, 0.935, f'y = sat( (ReLU(res + b) × {CFG["M"]} + 2^{CFG["s"] - 1}) >> {CFG["s"]} )   ·   '
-             'jeton gris en S2 : valeur négative mise à 0 par la ReLU   ·   cadre rouge en S3 : saturation   ·   '
-             '— : voie masquée, non écrite', ha='center', fontsize=9, color=TEXT_2)
+             'grey token in S2: negative value set to 0 by the ReLU   ·   red frame in S3: saturation   ·   '
+             '—: masked lane, not written', ha='center', fontsize=9, color=TEXT_2)
     fig.subplots_adjust(left=0.01, right=0.99, top=0.92, bottom=0.01)
 
     def frame(f):
         c, s = divmod(f % n_frames, SUB)
         s /= SUB
-        title.set_text(f'post_processing N = {N}  —  cycle {c} (depuis 2 cycles avant le premier résultat)')
+        title.set_text(f'post_processing N = {N}  —  cycle {c} (from 2 cycles before the first result)')
         return P_os.draw(rec_os, c, s) + P_ws.draw(rec_ws, c, s) + [title]
 
     if args.save:
@@ -215,7 +215,7 @@ def main():
             a.set_animated(False)
         anim = FuncAnimation(fig, frame, frames=n_frames, blit=False)
         anim.save(args.save, writer=PillowWriter(fps=args.fps), dpi=72)
-        print(f'animation enregistrée : {args.save}')
+        print(f'animation saved: {args.save}')
         return
 
     t0 = time.perf_counter()

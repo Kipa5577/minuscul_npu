@@ -1,7 +1,7 @@
 """
-Outils communs aux bancs de test (test.py, benchmark.py, animation.py).
+Tools shared by the testbenches (test.py, benchmark.py, animation.py).
 
-Utilisation depuis test/<bloc>/<fichier>.py :
+Usage from test/<block>/<file>.py:
     import sys, pathlib
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
     from common import ...
@@ -14,31 +14,31 @@ import traceback
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))          # permet `from src.<bloc>.<bloc> import ...`
+    sys.path.insert(0, str(ROOT))          # allows `from src.<block>.<block> import ...`
 
 import py4hw
 
 
-# --- Complément à deux -------------------------------------------------------
+# --- Two's complement --------------------------------------------------------
 
 def to_c2(v: int, w: int) -> int:
-    """Entier signé → motif de w bits."""
+    """Signed integer → w-bit pattern."""
     return v & ((1 << w) - 1)
 
 
 def from_c2(v: int, w: int) -> int:
-    """Motif de w bits → entier signé."""
+    """w-bit pattern → signed integer."""
     v &= (1 << w) - 1
     return v - (1 << w) if v >> (w - 1) else v
 
 
 def wrap(v: int, w: int) -> int:
-    """Réduit un entier signé modulo 2^w (comportement d'un additionneur de w bits)."""
+    """Reduces a signed integer modulo 2^w (behaviour of a w-bit adder)."""
     return from_c2(to_c2(v, w), w)
 
 
 def pack(values, w: int) -> int:
-    """Liste de valeurs signées → bus empaqueté (voie 0 = bits de poids faible)."""
+    """List of signed values → packed bus (lane 0 = least significant bits)."""
     bus = 0
     for l, v in enumerate(values):
         bus |= to_c2(int(v), w) << (w * l)
@@ -46,18 +46,18 @@ def pack(values, w: int) -> int:
 
 
 def unpack(bus: int, n: int, w: int) -> list:
-    """Bus empaqueté → liste de n valeurs signées."""
+    """Packed bus → list of n signed values."""
     return [from_c2(bus >> (w * l), w) for l in range(n)]
 
 
-def load_test_module(bloc: str, fichier: str = 'test.py'):
+def load_test_module(block: str, filename: str = 'test.py'):
     """
-    Charge test/<bloc>/<fichier> comme module (pour réutiliser ses bancs et modèles de référence).
-    Un `import test` classique tomberait sur le module `test` de la bibliothèque standard.
+    Loads test/<block>/<filename> as a module (to reuse its testbenches and reference models).
+    A plain `import test` would pick up the `test` module of the standard library.
     """
     import importlib.util
-    path = ROOT / 'test' / bloc / fichier
-    spec = importlib.util.spec_from_file_location(f'{bloc}_{path.stem}', path)
+    path = ROOT / 'test' / block / filename
+    spec = importlib.util.spec_from_file_location(f'{block}_{path.stem}', path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -65,10 +65,10 @@ def load_test_module(bloc: str, fichier: str = 'test.py'):
 
 def setup_matplotlib_fonts():
     """
-    Matplotlib relit le fichier de police à chaque texte dessiné. Selon le système de fichiers où il
-    est installé, cet accès peut devenir le facteur limitant des animations. Quand une copie identique
-    d'une police fournie par matplotlib existe parmi les polices du système, on utilise celle-ci.
-    Sans effet si aucune copie système n'est trouvée.
+    Matplotlib rereads the font file for every text it draws. Depending on the file system where it
+    is installed, this access can become the limiting factor of the animations. When an identical copy
+    of a font shipped with matplotlib exists among the system fonts, that copy is used instead.
+    No effect if no system copy is found.
     """
     import os
     import dataclasses
@@ -85,18 +85,18 @@ def setup_matplotlib_fonts():
     font_manager._get_font.cache_clear()
 
 
-# --- Banc de test générique ----------------------------------------------------
+# --- Generic testbench ---------------------------------------------------------
 
 class Bench:
     """
-    Système py4hw minimal autour d'un bloc.
+    Minimal py4hw system around a block.
 
-    - `inputs`  : {nom: largeur} des fils pilotés par le banc
-    - `outputs` : {nom: largeur} des fils lus par le banc
-    - `build(sys, wires)` instancie le bloc sous test
+    - `inputs` : {name: width} of the wires driven by the bench
+    - `outputs`: {name: width} of the wires read by the bench
+    - `build(sys, wires)` instantiates the block under test
 
-    Un appel à `step(**valeurs)` présente les entrées pendant un cycle puis
-    avance d'un front d'horloge ; les sorties lues ensuite sont celles d'après le front.
+    A call to `step(**values)` presents the inputs during one cycle, then
+    advances by one clock edge; the outputs read afterwards are those after the edge.
     """
 
     def __init__(self, inputs: dict, outputs: dict, build, signed=()):
@@ -111,7 +111,7 @@ class Bench:
 
     def set(self, **values):
         for n, v in values.items():
-            assert n in self.inputs, f'{n} n\'est pas une entrée'
+            assert n in self.inputs, f'{n} is not an input'
             self.w[n].put(to_c2(v, self.widths[n]))
 
     def get(self, name: str) -> int:
@@ -125,8 +125,8 @@ class Bench:
 
     def observe(self, **values) -> dict:
         """
-        Présente les entrées, propage la logique combinatoire, lit toutes les sorties PENDANT le cycle,
-        puis avance d'un front. Utile pour les blocs dont certaines sorties sont combinatoires.
+        Presents the inputs, propagates the combinational logic, reads all the outputs DURING the cycle,
+        then advances by one edge. Useful for blocks some of whose outputs are combinational.
         """
         self.set(**values)
         self.sim.propagateAll()
@@ -139,10 +139,10 @@ class Bench:
         return {n: self.get(n) for n in self.widths}
 
 
-# --- Mini exécuteur de tests ---------------------------------------------------
+# --- Mini test runner ----------------------------------------------------------
 
 def run_tests(module_globals: dict) -> int:
-    """Exécute toutes les fonctions test_* du module, affiche le bilan, renvoie le code de sortie."""
+    """Runs all the test_* functions of the module, prints the summary, returns the exit code."""
     tests = [(n, f) for n, f in module_globals.items()
              if n.startswith('test_') and inspect.isfunction(f)]
     failed = 0
@@ -152,7 +152,7 @@ def run_tests(module_globals: dict) -> int:
             print(f'  OK    {name}')
         except Exception:
             failed += 1
-            print(f'  ÉCHEC {name}')
+            print(f'  FAIL  {name}')
             traceback.print_exc(limit=3)
-    print(f'\n{len(tests) - failed}/{len(tests)} tests réussis')
+    print(f'\n{len(tests) - failed}/{len(tests)} tests passed')
     return 1 if failed else 0

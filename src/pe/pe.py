@@ -1,11 +1,11 @@
 """
-pe — Processing Element (spécification : src/pe/interface.md)
+pe — Processing Element (specification: src/pe/interface.md)
 
-Deux variantes, une par dataflow :
-  - PE_OS : output-stationary, l'accumulateur reste dans le PE
-  - PE_WS : weight-stationary, le poids reste dans le PE
+Two variants, one per dataflow:
+  - PE_OS: output-stationary, the accumulator stays in the PE
+  - PE_WS: weight-stationary, the weight stays in the PE
 
-Description comportementale : toutes les sorties sont des registres, mis à jour dans clock().
+Behavioural description: all outputs are registers, updated in clock().
 """
 
 from py4hw import Logic, Wire
@@ -17,7 +17,7 @@ def _signed(wire: Wire) -> int:
 
 
 class PE_OS(Logic):
-    """PE output-stationary : acc ← clear ? 0 : acc + w_in·x_in ; w_in et x_in passent au voisin."""
+    """Output-stationary PE: acc ← clear ? 0 : acc + w_in·x_in ; w_in and x_in are passed on to the neighbour."""
 
     def __init__(self, parent, name: str,
                  rst_n: Wire, w_in: Wire, x_in: Wire, clear: Wire,
@@ -45,7 +45,7 @@ class PE_OS(Logic):
             self.w_r, self.x_r, self.acc_r = 0, 0, 0
         else:
             if self.clear.get():
-                self.acc_r = 0                    # clear prioritaire : le produit du cycle est perdu
+                self.acc_r = 0                    # clear has priority: the product of this cycle is lost
             else:
                 self.acc_r += _signed(self.w_in) * _signed(self.x_in)
             self.w_r = self.w_in.get()
@@ -53,12 +53,12 @@ class PE_OS(Logic):
 
         self.w_out.prepare(self.w_r)
         self.x_out.prepare(self.x_r)
-        self.acc.prepare(self.acc_r)              # prepare() réduit modulo 2^AW
+        self.acc.prepare(self.acc_r)              # prepare() reduces modulo 2^AW
         self.acc_r &= (1 << self.acc.getWidth()) - 1
 
 
 class PE_WS(Logic):
-    """PE weight-stationary : psum_out ← psum_in + w_r·x_in ; si load : w_r ← w_load_in."""
+    """Weight-stationary PE: psum_out ← psum_in + w_r·x_in ; if load: w_r ← w_load_in."""
 
     def __init__(self, parent, name: str,
                  rst_n: Wire, x_in: Wire, psum_in: Wire, w_load_in: Wire, load: Wire,
@@ -88,11 +88,11 @@ class PE_WS(Logic):
             self.w_r, self.x_r, self.psum_r = 0, 0, 0
         else:
             w = IntegerHelper.c2_to_signed(self.w_r, self.w_load_out.getWidth())
-            self.psum_r = self.psum_in.get() + w * _signed(self.x_in)    # ancien poids
+            self.psum_r = self.psum_in.get() + w * _signed(self.x_in)    # old weight
             if self.load.get():
                 self.w_r = self.w_load_in.get()
             self.x_r = self.x_in.get()
 
         self.x_out.prepare(self.x_r)
-        self.psum_out.prepare(self.psum_r)        # prepare() réduit modulo 2^AW
+        self.psum_out.prepare(self.psum_r)        # prepare() reduces modulo 2^AW
         self.w_load_out.prepare(self.w_r)

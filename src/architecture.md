@@ -1,37 +1,37 @@
-# Architecture du minuscul_npu
+# Architecture of minuscul_npu
 
-Document de référence des décisions d'architecture.
-Prototypage en py4hw (travail partagé avec des agents IA), puis transcription manuelle en Verilog (faite
-entièrement par un humain, hors du périmètre des agents). Guide de reprise pour les agents : [`CLAUDE.md`](../CLAUDE.md).
+Reference document for the architecture decisions.
+Prototyping in py4hw (work shared with AI agents), then manual transcription into Verilog (done entirely by a human,
+outside the scope of the agents). Onboarding guide for the agents: [`CLAUDE.md`](../CLAUDE.md).
 
-Statuts : `OUVERT` (à décider) · `PROPOSÉ` (recommandation, à confirmer) · `DÉCIDÉ`
+Statuses: `OPEN` (to be decided) · `PROPOSED` (recommendation, to be confirmed) · `DECIDED`
 
-L'état d'avancement de l'implémentation et les résultats mesurés sont en [section 3b](#3b-implémentation-et-vérification).
+The implementation progress and the measured results are in [section 3b](#3b-implementation-and-verification).
 
 ---
 
-## 0. Objectifs et feuille de route
+## 0. Goals and roadmap
 
-**Objectif principal** : apprendre et comprendre une architecture de NPU *fonctionnelle*,
-et explorer ses compromis et ses points d'amélioration.
+**Main goal**: learn and understand a *working* NPU architecture, and explore its trade-offs and its points of
+improvement.
 
-**Principe directeur** : architecture **paramétrable** (taille de grille, largeurs de bits,
-tailles de buffers) afin de pouvoir mesurer l'impact de chaque choix.
+**Guiding principle**: a **parameterisable** architecture (array size, bit widths, buffer sizes) so that the impact of
+each choice can be measured.
 
-| Version | Cible | Priorité | Architecture |
+| Version | Target | Priority | Architecture |
 |---|---|---|---|
-| v1 | Simulation (py4hw) | Clarté, compréhension | Référence |
-| v2 | FPGA | Faire tenir et fonctionner sur du vrai matériel | Dérivée de v1, peut diverger |
-| v3 | Tiny Tapeout | Surface et broches minimales | Peut diverger fortement |
+| v1 | Simulation (py4hw) | Clarity, understanding | Reference |
+| v2 | FPGA | Fit and work on real hardware | Derived from v1, may diverge |
+| v3 | Tiny Tapeout | Minimal area and pins | May diverge strongly |
 
 ---
 
-## 1. Vue d'ensemble
+## 1. Overview
 
 ```
- Hôte ◄──► host_interface ──► controller ──────────────── (contrôle vers tous les blocs)
+ Host ◄──► host_interface ──► controller ──────────────── (control to all blocks)
                                    │
- Mém. ext. ◄──► dma (v2) ──► weight_buffer ──────┐
+ Ext. mem. ◄──► dma (v2) ──► weight_buffer ──────┐
                          └──► activation_buffer ─┼──► data_feeder ──► pe_array (N×N pe)
                                       ▲          │                        │
                                       │          │                  output_drain
@@ -39,381 +39,386 @@ tailles de buffers) afin de pouvoir mesurer l'impact de chaque choix.
                                       └──────────┴──────────────── post_processing
 ```
 
-## 2. Blocs fonctionnels
+## 2. Functional blocks
 
-L'interface détaillée de chaque bloc (ports, largeurs, latences) est dans `src/<bloc>/interface.md`,
-selon les conventions de la [section 5](#5-conventions-dinterface).
+The detailed interface of each block (ports, widths, latencies) is in `src/<block>/interface.md`, following the
+conventions of [section 5](#5-interface-conventions).
 
-| Bloc | Fonction |
+| Block | Function |
 |---|---|
-| `npu_top` | Assemblage de tous les blocs, broches de la puce |
-| `host_interface` | Protocole de bus hôte + banc de registres de configuration/statut |
-| `controller` | Séquenceur : boucles de tuiles, génération des adresses et des signaux de contrôle |
-| `dma` | Transferts mémoire externe ↔ buffers internes |
-| `weight_buffer` | SRAM locale des poids W |
-| `activation_buffer` | SRAM locale des activations X (entrées et sorties de couche) |
-| `data_feeder` | Lecture des buffers et injection décalée (en escalier) dans la grille |
-| `pe` | Processing Element : registres de passage w/x + MAC + accumulateur |
-| `pe_array` | Grille N×N de `pe` connectés aux voisins |
-| `output_drain` | Récupération et sérialisation des accumulateurs |
-| `post_processing` | Biais → activation → requantification → saturation |
+| `npu_top` | Assembly of all the blocks, pins of the chip |
+| `host_interface` | Host bus protocol + configuration/status register bank |
+| `controller` | Sequencer: tile loops, generation of the addresses and control signals |
+| `dma` | Transfers external memory ↔ internal buffers |
+| `weight_buffer` | Local SRAM for the weights W |
+| `activation_buffer` | Local SRAM for the activations X (layer inputs and outputs) |
+| `data_feeder` | Reading of the buffers and skewed (staircase) injection into the array |
+| `pe` | Processing Element: w/x pass-through registers + MAC + accumulator |
+| `pe_array` | N×N array of `pe` connected to their neighbours |
+| `output_drain` | Collection and serialisation of the accumulators |
+| `post_processing` | Bias → activation → requantization → saturation |
 
 ---
 
-## 3. Décisions d'architecture
+## 3. Architecture decisions
 
-### D1 — Cible d'implémentation · `DÉCIDÉ` : par étapes (simulation → FPGA → Tiny Tapeout)
-- v1 en simulation, optimisée pour l'apprentissage : pas de contrainte physique.
-- v2 sur FPGA (modèle à préciser plus tard).
-- v3 sur Tiny Tapeout (~8 entrées / 8 sorties / 8 bidirectionnelles, surface minuscule).
-- Chaque version peut avoir sa propre architecture. Les écarts par rapport à v1 seront documentés.
+### D1 — Implementation target · `DECIDED`: in stages (simulation → FPGA → Tiny Tapeout)
+- v1 in simulation, optimised for learning: no physical constraint.
+- v2 on FPGA (model to be specified later).
+- v3 on Tiny Tapeout (~8 inputs / 8 outputs / 8 bidirectional, tiny area).
+- Each version may have its own architecture. The differences with respect to v1 will be documented.
 
-### D2 — Charge de travail de référence · `DÉCIDÉ` : GEMM générique
-- Le NPU calcule `Y = W · X (+ b)` pour des dimensions M, K, N paramétrables.
-- Pas de convolution native : une convolution passe par im2col, fait côté hôte.
-- Conséquence : le pooling sort du périmètre de `post_processing` (D10).
+### D2 — Reference workload · `DECIDED`: generic GEMM
+- The NPU computes `Y = W · X (+ b)` for parameterisable dimensions M, K, N.
+- No native convolution: a convolution goes through im2col, done on the host side.
+- Consequence: pooling is outside the scope of `post_processing` (D10).
 
-### D3 — Dataflow · `DÉCIDÉ` : output-stationary ET weight-stationary, comparables
-- Les deux variantes sont implémentées derrière **la même interface externe**, pour pouvoir les comparer.
-- Row-stationary : écarté (trop complexe, et pensé pour les convolutions).
+### D3 — Dataflow · `DECIDED`: output-stationary AND weight-stationary, comparable
+- Both variants are implemented behind **the same external interface**, so that they can be compared.
+- Row-stationary: rejected (too complex, and designed for convolutions).
 
 | | Output-stationary (OS) | Weight-stationary (WS) |
 |---|---|---|
-| Stationnaire dans le PE | accumulateur int32 | poids int8 |
-| Circule entre PE | W (8 b) →, X (8 b) ↓ | X (8 b) →, psum (32 b) ↓ |
-| Phase de préchargement | non | oui (poids) |
-| Sortie des résultats | vidage des accumulateurs | flux en bas de la grille |
-| Grille pour une tuile | M × N | K × M |
+| Stationary in the PE | int32 accumulator | int8 weight |
+| Flows between PEs | W (8 b) →, X (8 b) ↓ | X (8 b) →, psum (32 b) ↓ |
+| Preload phase | no | yes (weights) |
+| Output of the results | draining of the accumulators | stream at the bottom of the array |
+| Array for one tile | M × N | K × M |
 
-**Frontière de variante — le « cœur de calcul »** : ce n'est pas seulement le PE qui change.
-`data_feeder`, `pe`, `pe_array` et `output_drain` diffèrent entre OS et WS.
-Le cœur de calcul est donc l'ensemble de ces quatre blocs. Son interface commune :
-- en entrée : lecture de `weight_buffer` et `activation_buffer` + commandes du `controller` ;
-- en sortie : flux de résultats int32 vers `post_processing`.
+**Variant boundary — the "compute core"**: it is not only the PE that changes.
+`data_feeder`, `pe`, `pe_array` and `output_drain` differ between OS and WS.
+The compute core is therefore the set of these four blocks. Its common interface:
+- as input: reading from `weight_buffer` and `activation_buffer` + commands from the `controller`;
+- as output: stream of int32 results to `post_processing`.
 
-Les buffers, le `controller` (à quelques phases près), `post_processing` et `host_interface` sont partagés.
+The buffers, the `controller` (apart from a few phases), `post_processing` and `host_interface` are shared.
 
-**Métriques de comparaison** : nombre de cycles par GEMM, nombre de lectures SRAM,
-nombre de registres et de bits de fils entre PE, taux d'utilisation des PE.
+**Comparison metrics**: number of cycles per GEMM, number of SRAM reads, number of registers and of wire bits between
+PEs, PE utilisation rate.
 
-### D4 — Taille de la grille de PE · `DÉCIDÉ` : 4×4 par défaut, paramétrable
-- 16 PE : assez pour observer le pipeline, le décalage et le tiling.
-- Le paramètre N reste libre (2×2 pour le débogage, 8×8 pour l'exploration).
-- Surface ∝ N², débit crête = N² MAC/cycle.
+### D4 — Size of the PE array · `DECIDED`: 4×4 by default, parameterisable
+- 16 PEs: enough to observe the pipeline, the skewing and the tiling.
+- The parameter N remains free (2×2 for debugging, 8×8 for exploration).
+- Area ∝ N², peak throughput = N² MACs/cycle.
 
-### D5 — Format numérique · `DÉCIDÉ` : int8 signé × int8 signé → accumulateur int32 signé
-- Complément à deux partout.
-- Produit 8×8 signé : au plus (−128)² = 16 384 = 2^14. Un accumulateur int32 ne peut donc pas déborder tant que
-  K ≤ 131 071 (valeur mesurée sur le PE dans `test/pe/benchmark.py`), très au-delà de `DIM_MAX` = 64.
-  Pour K ≤ 64, 22 bits suffiraient : piste de réduction pour la v3.
-- Les largeurs restent des paramètres (exploration int4, accumulateur réduit, etc.).
+### D5 — Number format · `DECIDED`: signed int8 × signed int8 → signed int32 accumulator
+- Two's complement everywhere.
+- Signed 8×8 product: at most (−128)² = 16,384 = 2^14. An int32 accumulator therefore cannot overflow as long as
+  K ≤ 131,071 (value measured on the PE in `test/pe/benchmark.py`), far beyond `DIM_MAX` = 64.
+  For K ≤ 64, 22 bits would be enough: a reduction lead for v3.
+- The widths remain parameters (int4 exploration, reduced accumulator, etc.).
 
-### D6 — Mémoire interne · `DÉCIDÉ`
-- `weight_buffer` et `activation_buffer` **séparés**, lus en parallèle (pas de conflit d'accès).
-- **Simple buffer** : pas de recouvrement entre chargement et calcul en v1.
-  Le double buffering est un compromis à explorer plus tard (utilisation des PE contre mémoire ×2).
-- Largeur de lecture : une ligne de N éléments int8 par cycle (N×8 bits), pour alimenter la grille à plein débit.
-- Les résultats int8 sont écrits dans `activation_buffer` (zone de sortie), où l'hôte vient les relire.
-- **Tailles** : matrices jusqu'à **64×64** (paramètre `DIM_MAX`). Tout tient en mémoire,
-  et c'est le `controller` qui fait tout le tiling.
+### D6 — Internal memory · `DECIDED`
+- **Separate** `weight_buffer` and `activation_buffer`, read in parallel (no access conflict).
+- **Single buffer**: no overlap between loading and computation in v1.
+  Double buffering is a trade-off to be explored later (PE utilisation versus ×2 memory).
+- Read width: one row of N int8 elements per cycle (N×8 bits), to feed the array at full throughput.
+- The int8 results are written into `activation_buffer` (output area), where the host reads them back.
+- **Sizes**: matrices up to **64×64** (parameter `DIM_MAX`). Everything fits in memory, and the `controller` does all
+  the tiling.
 
-| Mémoire | Contenu | Taille (DIM_MAX = 64) |
+| Memory | Contents | Size (DIM_MAX = 64) |
 |---|---|---|
-| `weight_buffer` | W, int8, M×K | 4 Kio |
-| `activation_buffer` | X en entrée (K×N) + Y en sortie (M×N), int8 | 8 Kio (2 zones) |
-| biais (dans `post_processing`) | b, int32, M valeurs | 256 o |
-| accumulateurs (dans `output_drain`, **WS seulement**) | sommes partielles int32 : une entrée par colonne j (64), N = 4 voies | 1 Kio |
+| `weight_buffer` | W, int8, M×K | 4 KiB |
+| `activation_buffer` | X as input (K×N) + Y as output (M×N), int8 | 8 KiB (2 areas) |
+| biases (in `post_processing`) | b, int32, M values | 256 B |
+| accumulators (in `output_drain`, **WS only**) | int32 partial sums: one entry per column j (64), N = 4 lanes | 1 KiB |
 
-- Registres de dimensions M, K, N : 7 bits chacun, valeurs de 1 à 64.
-- Avec une grille 4×4, un GEMM 64×64×64 compte (64/4)² = 256 tuiles de sortie, chacune de 64 pas en K.
+- Dimension registers M, K, N: 7 bits each, values from 1 to 64.
+- With a 4×4 array, a 64×64×64 GEMM has (64/4)² = 256 output tiles, each with 64 steps in K.
 
-#### Disposition des données (layout) · `DÉCIDÉ` : tuilée, propre à chaque variante
-- Un mot mémoire fait 32 bits et contient **4 × int8**. Ce sont exactement les 4 éléments que la grille consomme
-  en un cycle. L'élément de la voie `l` (l = 0..3) occupe l'octet `l`, l'octet 0 étant celui de poids faible.
-- La taille des tuiles est fixe (`DIM_MAX` = 64), donc l'adresse se forme par **concaténation de bits**,
-  sans multiplieur : `adresse = {indice_de_tuile[3:0], indice[5:0]}`.
+#### Data layout · `DECIDED`: tiled, specific to each variant
+- A memory word is 32 bits wide and holds **4 × int8**. These are exactly the 4 elements that the array consumes in
+  one cycle. The element of lane `l` (l = 0..3) occupies byte `l`, byte 0 being the least significant one.
+- The tile size is fixed (`DIM_MAX` = 64), so the address is formed by **bit concatenation**, without a multiplier:
+  `address = {tile_index[3:0], index[5:0]}`.
 
-| Matrice | Variante | Mot à l'adresse `{t, u}` | contient |
+| Matrix | Variant | Word at address `{t, u}` | holds |
 |---|---|---|---|
-| W | OS et WS | `{i_t, k}` | `W[4·i_t + l][k]` |
+| W | OS and WS | `{i_t, k}` | `W[4·i_t + l][k]` |
 | X | OS | `{j_t, k}` | `X[k][4·j_t + l]` |
 | X | WS | `{k_t, j}` | `X[4·k_t + l][j]` |
 | Y | OS | `{j_t, i}` | `Y[i][4·j_t + l]` |
 | Y | WS | `{i_t, j}` | `Y[4·i_t + l][j]` |
 
-- Le format de **W est commun** aux deux variantes. Celui de **X est transposé** entre OS et WS.
-- Chaque variante écrit Y **dans le format X qu'elle attend en entrée**. On peut donc donner la sortie d'une couche
-  directement en entrée de la couche suivante, sans reformatage.
-- C'est l'hôte qui formate W et X selon la variante. Compromis écarté pour l'instant : un transposeur matériel,
-  ou des bancs entrelacés en diagonale (*skewed storage*), à explorer dans une version ultérieure.
+- The format of **W is common** to both variants. That of **X is transposed** between OS and WS.
+- Each variant writes Y **in the X format it expects as input**. The output of a layer can therefore be given directly
+  as the input of the next layer, without reformatting.
+- The host formats W and X according to the variant. Trade-off set aside for now: a hardware transposer, or
+  diagonally interleaved banks (*skewed storage*), to be explored in a later version.
 
-### D7 — Interface hôte · `DÉCIDÉ` : bus parallèle simple de 32 bits
-- Signaux : `addr[12:0]` (adresse de mot), `wdata[31:0]`, `we`, `re`, `rdata[31:0]`.
-  Un accès par cycle, latence de lecture fixe.
-- Un mot du bus correspond à un mot des buffers (4 × int8) ou à un biais int32.
-- Adaptateurs prévus : Wishbone (v2 FPGA), SPI (v3 Tiny Tapeout).
+### D7 — Host interface · `DECIDED`: simple 32-bit parallel bus
+- Signals: `addr[12:0]` (word address), `wdata[31:0]`, `we`, `re`, `rdata[31:0]`.
+  One access per cycle, fixed read latency.
+- A bus word corresponds to a buffer word (4 × int8) or to an int32 bias.
+- Planned adapters: Wishbone (v2 FPGA), SPI (v3 Tiny Tapeout).
 
-#### Carte mémoire · `DÉCIDÉ`
-| Adresse (mots) | Nom | Accès | Contenu |
+#### Memory map · `DECIDED`
+| Address (words) | Name | Access | Contents |
 |---|---|---|---|
-| `0x0000` | `ID` | RO | type de dataflow (0 = OS, 1 = WS), taille de grille N, `DIM_MAX` |
-| `0x0001` | `CTRL` | RW | b0 `GO` (remis à 0 automatiquement), b1 `RELU_EN` |
-| `0x0002` | `STATUS` | RO | b0 `BUSY`, b1 `DONE` (remis à 0 par `GO`) |
+| `0x0000` | `ID` | RO | dataflow type (0 = OS, 1 = WS), array size N, `DIM_MAX` |
+| `0x0001` | `CTRL` | RW | b0 `GO` (automatically cleared to 0), b1 `RELU_EN` |
+| `0x0002` | `STATUS` | RO | b0 `BUSY`, b1 `DONE` (cleared to 0 by `GO`) |
 | `0x0003` | `DIM_M` | RW | 1..64 |
 | `0x0004` | `DIM_K` | RW | 1..64 |
 | `0x0005` | `DIM_N` | RW | 1..64 |
-| `0x0006` | `REQ_MULT` | RW | M, 16 bits non signé |
+| `0x0006` | `REQ_MULT` | RW | M, 16 bits unsigned |
 | `0x0007` | `REQ_SHIFT` | RW | s, 5 bits |
-| `0x0008` | `CYCLES` | RO | nombre de cycles du dernier GEMM, pour les benchmarks |
-| `0x0009`–`0x03FF` | — | — | réservé |
-| `0x0400`–`0x07FF` | `WEIGHT` | RW | `weight_buffer`, 1024 mots |
-| `0x0800`–`0x0BFF` | `ACT_IN` | RW | `activation_buffer`, zone d'entrée X |
-| `0x0C00`–`0x0FFF` | `ACT_OUT` | RW | `activation_buffer`, zone de sortie Y |
-| `0x1000`–`0x103F` | `BIAS` | RW | biais int32, un par ligne de sortie |
+| `0x0008` | `CYCLES` | RO | number of cycles of the last GEMM, for the benchmarks |
+| `0x0009`–`0x03FF` | — | — | reserved |
+| `0x0400`–`0x07FF` | `WEIGHT` | RW | `weight_buffer`, 1024 words |
+| `0x0800`–`0x0BFF` | `ACT_IN` | RW | `activation_buffer`, input area X |
+| `0x0C00`–`0x0FFF` | `ACT_OUT` | RW | `activation_buffer`, output area Y |
+| `0x1000`–`0x103F` | `BIAS` | RW | int32 biases, one per output row |
 
-- Pendant un GEMM (`BUSY = 1`, ou impulsion `go` en cours), les accès de l'hôte aux mémoires et les écritures de
-  configuration sont **ignorés** ; les registres restent lisibles.
-- Amélioration possible : un bit qui échange les rôles de `ACT_IN` et `ACT_OUT`, pour enchaîner les couches sans copie.
+- During a GEMM (`BUSY = 1`, or a `go` pulse in progress), the host's accesses to the memories and the configuration
+  writes are **ignored**; the registers remain readable.
+- Possible improvement: a bit that swaps the roles of `ACT_IN` and `ACT_OUT`, to chain layers without a copy.
 
-### D8 — Accès mémoire externe · `DÉCIDÉ` : pas de DMA en v1
-- Les buffers sont mappés dans l'espace d'adresse de `host_interface`, et l'hôte les remplit et les relit directement.
-- Le dossier `dma/` est réservé à la v2 (FPGA).
+### D8 — External memory access · `DECIDED`: no DMA in v1
+- The buffers are mapped into the address space of `host_interface`, and the host fills them and reads them back
+  directly.
+- The `dma/` folder is reserved for v2 (FPGA).
 
-### D9 — Contrôle · `DÉCIDÉ` : FSM câblée
-- L'hôte écrit la configuration (M, K, N, paramètres de post-traitement ; les zones mémoire sont fixes) dans des registres, puis lance `go`.
-- Le `controller` exécute le GEMM complet (toutes les tuiles) et lève `done`.
-- Les phases dépendent du dataflow : WS ajoute une phase de préchargement des poids.
-- Évolution possible : mini-ISA dans une version ultérieure (compromis à explorer).
+### D9 — Control · `DECIDED`: hardwired FSM
+- The host writes the configuration (M, K, N, post-processing parameters; the memory areas are fixed) into registers,
+  then issues `go`.
+- The `controller` runs the complete GEMM (all the tiles) and raises `done`.
+- The phases depend on the dataflow: WS adds a weight preload phase.
+- Possible evolution: a mini-ISA in a later version (trade-off to be explored).
 
-#### Ordre des boucles de tuiles · `DÉCIDÉ`
+#### Order of the tile loops · `DECIDED`
 ```
-OS :  for i_t in tuiles(M):          WS :  for i_t in tuiles(M):
-        for j_t in tuiles(N):                for k_t in tuiles(K):
-          clear accumulateurs                  précharger W[4·i_t.., 4·k_t..]
+OS :  for i_t in tiles(M):           WS :  for i_t in tiles(M):
+        for j_t in tiles(N):                 for k_t in tiles(K):
+          clear accumulators                   preload W[4·i_t.., 4·k_t..]
           for k in 0..K-1:                     for j in 0..N-1:
-            injecter W, X                        injecter X[4·k_t.., j]
-          vider → post_processing                acc[.., j] += psum en bas de la grille
+            inject W, X                          inject X[4·k_t.., j]
+          drain → post_processing                acc[.., j] += psum at the bottom of the array
                                              acc → post_processing
 ```
-- **OS** : k est forcément la boucle interne, puisque l'accumulation se fait dans le PE. Il n'y a pas de cache
-  entre les buffers et la grille, donc l'ordre de (i_t, j_t) ne change pas le nombre de lectures SRAM.
-- **WS** : avec i_t à l'extérieur et k_t au milieu, la mémoire d'accumulateurs se limite à 4 × N int32 (1 Kio).
-  L'ordre k_t → i_t → j demanderait M × N int32 (16 Kio). C'est un contre-exemple à mesurer (pas encore fait).
-- Dans les deux cas, i_t est à l'extérieur, donc le post-traitement reçoit les lignes de sortie dans l'ordre.
+- **OS**: k is necessarily the inner loop, since the accumulation takes place in the PE. There is no cache between the
+  buffers and the array, so the order of (i_t, j_t) does not change the number of SRAM reads.
+- **WS**: with i_t on the outside and k_t in the middle, the accumulator memory is limited to 4 × N int32 (1 KiB).
+  The order k_t → i_t → j would require M × N int32 (16 KiB). This is a counter-example to be measured (not done yet).
+- In both cases, i_t is on the outside, so post-processing receives the output rows in order.
 
-#### Dimensions non multiples de 4 · `DÉCIDÉ` : masquage en lecture et en écriture
-- Le `data_feeder` injecte **0** dans chaque voie dont l'indice dépasse la limite (i ≥ M, j ≥ N ou k ≥ K).
-  Un 0 est neutre pour le MAC, donc le calcul reste juste sans que l'hôte complète ses matrices.
-- Les écritures de Y hors limites (i ≥ M ou j ≥ N) sont **bloquées** : chaque octet a son propre masque d'écriture.
-- En OS, K n'a pas besoin de ce masquage (on envoie simplement K pas). En WS, ce sont les voies k ≥ K qui sont masquées.
-- Coût matériel : un comparateur par voie et par dimension.
-- Variante à comparer (pas encore faite) : un signal enable par PE, qui gèle les PE inutiles pour économiser de l'énergie.
+#### Dimensions that are not multiples of 4 · `DECIDED`: masking on read and on write
+- The `data_feeder` injects **0** into every lane whose index goes beyond the limit (i ≥ M, j ≥ N or k ≥ K).
+  A 0 is neutral for the MAC, so the computation stays correct without the host having to pad its matrices.
+- Out-of-bounds writes of Y (i ≥ M or j ≥ N) are **blocked**: each byte has its own write mask.
+- In OS, K does not need this masking (we simply send K steps). In WS, it is the lanes k ≥ K that are masked.
+- Hardware cost: one comparator per lane and per dimension.
+- Variant to be compared (not done yet): an enable signal per PE, which freezes the unused PEs to save energy.
 
-### D10 — Opérations de post-traitement · `DÉCIDÉ` : biais → ReLU → requantification int8
-Pipeline, dans cet ordre :
-1. **Biais** : `acc + b[i]`, avec b en int32, un biais par ligne de sortie.
-2. **ReLU** : `max(0, x)`, activable ou non par un bit de configuration.
-3. **Requantification** : `y = sat8( (x × M + 2^(s-1)) >> s )`
-   - M : 16 bits non signé (registre `REQ_MULT`). s : 5 bits, de 0 à 31 (registre `REQ_SHIFT`). Si s = 0, il n'y a pas d'arrondi.
-   - Multiplieur 32 × 16 bits, produit sur 48 bits. Le décalage `>>` est arithmétique (il conserve le signe).
-   - Arrondi au plus proche, demi vers +∞ (ajout de 2^(s-1)).
-   - Saturation dans [-128, 127].
-   - **Granularité par couche** : une seule paire (M, s) pour tout le GEMM.
-     Une paire par ligne de sortie est une évolution possible (64 mots en plus, à côté des biais).
-- **Quantification symétrique** : le point zéro vaut 0 pour W, X et Y, donc il n'y a pas de correction de zero-point.
-- **Débit** : `post_processing` traite **4 voies en parallèle**, au rythme de la grille. Il contient donc 4 multiplieurs 32×16.
-  Une version à une seule voie, plus petite mais plus lente au vidage, est un compromis à mesurer.
-- Écartés : pooling (hors périmètre GEMM), LUT sigmoïde/tanh, bypass int32.
-- Note : sans bypass, on vérifiera les accumulateurs bruts directement en simulation py4hw.
+### D10 — Post-processing operations · `DECIDED`: bias → ReLU → int8 requantization
+Pipeline, in this order:
+1. **Bias**: `acc + b[i]`, with b in int32, one bias per output row.
+2. **ReLU**: `max(0, x)`, enabled or not by a configuration bit.
+3. **Requantization**: `y = sat8( (x × M + 2^(s-1)) >> s )`
+   - M: 16 bits unsigned (register `REQ_MULT`). s: 5 bits, from 0 to 31 (register `REQ_SHIFT`). If s = 0, there is no
+     rounding.
+   - 32 × 16-bit multiplier, 48-bit product. The shift `>>` is arithmetic (it preserves the sign).
+   - Round to nearest, half towards +∞ (addition of 2^(s-1)).
+   - Saturation to [-128, 127].
+   - **Per-layer granularity**: a single (M, s) pair for the whole GEMM.
+     One pair per output row is a possible evolution (64 more words, next to the biases).
+- **Symmetric quantization**: the zero point is 0 for W, X and Y, so there is no zero-point correction.
+- **Throughput**: `post_processing` processes **4 lanes in parallel**, at the pace of the array. It therefore contains
+  4 32×16 multipliers. A single-lane version, smaller but slower at draining, is a trade-off to be measured.
+- Rejected: pooling (outside the GEMM scope), sigmoid/tanh LUT, int32 bypass.
+- Note: without a bypass, the raw accumulators will be checked directly in the py4hw simulation.
 
-### D11 — Horloge et reset · `DÉCIDÉ` : une seule horloge, reset synchrone actif bas
-- Un seul domaine d'horloge `clk`, donc pas de franchissement de domaine (CDC).
-- Reset `rst_n` synchrone actif bas, comme la convention Tiny Tapeout.
-- Fréquence : sans objet en v1. Elle sera fixée en v2 selon le FPGA.
+### D11 — Clock and reset · `DECIDED`: a single clock, synchronous active-low reset
+- A single clock domain `clk`, hence no clock domain crossing (CDC).
+- Synchronous active-low reset `rst_n`, as in the Tiny Tapeout convention.
+- Frequency: not applicable in v1. It will be set in v2 according to the FPGA.
 
-### D12 — Protocole entre blocs · `DÉCIDÉ` : contrôle centralisé
-- Le `controller` connaît la latence de chaque bloc et pilote tout de façon déterministe, au cycle près.
-- Pas de valid/ready interne en v1. Ça deviendra nécessaire en v2 avec un DMA (latence mémoire variable).
+### D12 — Protocol between blocks · `DECIDED`: centralised control
+- The `controller` knows the latency of each block and drives everything deterministically, to the exact cycle.
+- No internal valid/ready in v1. It will become necessary in v2 with a DMA (variable memory latency).
 
 ---
 
-## 3b. Implémentation et vérification
+## 3b. Implementation and verification
 
-### Style d'implémentation
-Chaque bloc est écrit en **py4hw comportemental**, dans `src/<bloc>/<bloc>.py` : une classe `Logic` dont la
-méthode `clock()` décrit les registres (mis à jour au front, sorties publiées avec `prepare()`) et, si le bloc a des
-sorties combinatoires, une méthode `propagate()` (sorties publiées avec `put()`). Les blocs purement structurels
-(`pe_array`) se contentent d'instancier et de câbler d'autres blocs.
-Les variantes de dataflow sont des classes distinctes (`…_OS`, `…_WS`) avec la même interface.
+### Implementation style
+Each block is written in **behavioural py4hw**, in `src/<block>/<block>.py`: a `Logic` class whose `clock()` method
+describes the registers (updated at the edge, outputs published with `prepare()`) and, if the block has combinational
+outputs, a `propagate()` method (outputs published with `put()`). Purely structural blocks (`pe_array`) merely
+instantiate and wire other blocks.
+The dataflow variants are distinct classes (`…_OS`, `…_WS`) with the same interface.
 
-### Vérification
-Chaque bloc et chaque assemblage a un banc de test dans `test/<bloc>/`, composé de `test.py` (fonctionnel),
-`benchmark.py` (limites et compromis, figures matplotlib) et `animation.py` (visualisation cycle par cycle).
-La convention complète est décrite dans [`test/README.md`](../test/README.md).
+### Verification
+Each block and each assembly has a testbench in `test/<block>/`, made of `test.py` (functional), `benchmark.py`
+(limits and trade-offs, matplotlib figures) and `animation.py` (cycle-by-cycle visualisation).
+The complete convention is described in [`test/README.md`](../test/README.md).
 
-### État d'avancement
-| Bloc | Implémentation | Tests | Benchmark | Animation |
+### Progress
+| Block | Implementation | Tests | Benchmark | Animation |
 |---|---|---|---|---|
 | `pe` | ✅ `PE_OS`, `PE_WS` | ✅ 18 | ✅ | ✅ |
 | `pe_array` | ✅ `PE_Array_OS`, `PE_Array_WS` | ✅ 10 | ✅ | ✅ |
 | `data_feeder` | ✅ `DataFeeder_OS`, `DataFeeder_WS` | ✅ 7 | ✅ | ✅ |
-| `output_drain` | ✅ `OutputDrain_OS`, `OutputDrain_WS` | ✅ 10, dont GEMM de bout en bout | ✅ | ✅ |
-| `post_processing` | ✅ `PostProcessing_OS`, `PostProcessing_WS` | ✅ 12, dont GEMM de bout en bout | ✅ | ✅ |
+| `output_drain` | ✅ `OutputDrain_OS`, `OutputDrain_WS` | ✅ 10, including end-to-end GEMM | ✅ | ✅ |
+| `post_processing` | ✅ `PostProcessing_OS`, `PostProcessing_WS` | ✅ 12, including end-to-end GEMM | ✅ | ✅ |
 | `weight_buffer` | ✅ `WeightBuffer` | ✅ 6 | ✅ | ✅ |
-| `activation_buffer` | ✅ `ActivationBuffer` | ✅ 8, dont deux couches enchaînées par la mémoire | ✅ | ✅ |
-| `controller` | ✅ `Controller_OS`, `Controller_WS` | ✅ 8, dont identité cycle par cycle avec le planificateur et NPU complet sans `host_interface` | ✅ | ✅ |
+| `activation_buffer` | ✅ `ActivationBuffer` | ✅ 8, including two layers chained through the memory | ✅ | ✅ |
+| `controller` | ✅ `Controller_OS`, `Controller_WS` | ✅ 8, including cycle-by-cycle identity with the scheduler and complete NPU without `host_interface` | ✅ | ✅ |
 | `host_interface` | ✅ `HostInterface` | ✅ 9 | ✅ | ✅ |
-| `npu_top` | ✅ `NpuTop` | ✅ 8, puce complète pilotée par son bus | ✅ | ✅ |
+| `npu_top` | ✅ `NpuTop` | ✅ 8, complete chip driven through its bus | ✅ | ✅ |
 | `dma` | v2 | | | |
 
-Le **chemin de données complet avec ses mémoires** (`weight_buffer`, `activation_buffer` → `data_feeder` →
-`pe_array` → `output_drain` → `post_processing` → `activation_buffer`) est vérifié de bout en bout, piloté comme le
-fera l'hôte : chargement de W, X et des biais selon la disposition D6, GEMM multi-tuiles (dimensions non multiples
-de N, mémoire « sale », biais, ReLU, requantification), relecture de Y, puis deux couches enchaînées par simple
-recopie OUT → IN. Les deux variantes écrivent exactement le même Y.
+The **complete datapath with its memories** (`weight_buffer`, `activation_buffer` → `data_feeder` → `pe_array` →
+`output_drain` → `post_processing` → `activation_buffer`) is verified end to end, driven as the host will drive it:
+loading of W, X and the biases according to the D6 layout, multi-tile GEMM (dimensions that are not multiples of N,
+"dirty" memory, biases, ReLU, requantization), reading Y back, then two layers chained by a simple OUT → IN copy. Both
+variants write exactly the same Y.
 
-**La puce complète (`npu_top`) fonctionne** : pilotée uniquement par son bus de 32 bits et sa carte mémoire, par un
-logiciel hôte de référence (`test/npu_top/test.py`), elle calcule des couches justes dans les deux variantes,
-enchaîne des couches et exécute un petit réseau de neurones quantifié.
+**The complete chip (`npu_top`) works**: driven only through its 32-bit bus and its memory map, by reference host
+software (`test/npu_top/test.py`), it computes correct layers in both variants, chains layers and runs a small
+quantized neural network.
 
-### Résultats mesurés (N = 4)
-| Mesure | OS | WS | Source |
+### Measured results (N = 4)
+| Measurement | OS | WS | Source |
 |---|---|---|---|
-| Latences du PE | 1 cycle | 1 cycle | `test/pe/benchmark.py` |
-| Cycles pour une tuile isolée (flux de longueur L) | L + 2N − 2 | L + 3N − 2 (préchargement inclus) | `test/pe_array/benchmark.py` |
-| Écart minimal avant rechargement des poids | — | 2N − 2 cycles (FLUSH = 2N − 3) | `test/pe_array/test.py` |
-| MAC utiles par octet lu en SRAM (tuile, flux de 64) | 2,0 | 3,8 | `test/data_feeder/benchmark.py` |
-| Débit SRAM nécessaire (tuile, flux de 64) | 7,2 octets/cycle | 3,6 octets/cycle | `test/data_feeder/benchmark.py` |
-| Voies perdues au masquage (D = 1..64, moyenne) | 8 % | 8 % | `test/data_feeder/benchmark.py` |
-| GEMM 16×16×16 de bout en bout (dernier résultat) | 448 cycles | 403 cycles | `test/output_drain/benchmark.py` |
-| Utilisation de la grille, GEMM 16³ / 32³ | 57 % / 73 % | 64 % / 78 % | `test/output_drain/benchmark.py` |
-| Dernier mot de Y écrit, GEMM 16³ (avec post_processing) | cycle 451 | cycle 406 | `test/post_processing/benchmark.py` |
-| Erreur de requantification, M sur 16 bits / 8 bits | 0 / 1 pas int8 | identique | `test/post_processing/benchmark.py` |
-| MLP 64 → 32 → 16 sur le NPU simulé contre le flottant | corrélation 0,9998 | identique | `test/post_processing/benchmark.py` |
-| Lectures de W pour un GEMM 32³ (minimum 256) | 2048 | 256 | `test/weight_buffer/benchmark.py` |
-| Part du calcul dans le temps total (hôte compris), GEMM 4³ / 64³ | 50 % / 86 % | 56 % / 86 % | `test/activation_buffer/benchmark.py` |
-| Couche 64 → 48 sur un lot de 16 (WS moins bon quand le lot est petit) | 3652 cycles | 4812 cycles | `test/activation_buffer/benchmark.py` |
-| GEMM 64³ piloté par le controller (go → done) | 19 461 cycles | 18 701 cycles | `test/controller/benchmark.py` |
-| Utilisation quand K = 4 (M = N = 32) / quand N = 4 (M = K = 32) | 25 % / 72 % | 75 % / 30 % | `test/controller/benchmark.py` |
-| Débit de la puce, couche 64³, hôte compris / calcul seul | 11,6 / 13,5 MAC/cycle | 12,0 / 14,0 MAC/cycle | `test/host_interface/benchmark.py` |
-| MLP 64 → 32 → 16 flottant quantifié, sur la puce par le bus | corrélation 0,9999 | identique | `test/npu_top/benchmark.py` |
-| Couche 64 → 64, cycles par échantillon, lot de 1 / de 64 | 2446 / 353 | 3702 / 341 | `test/npu_top/benchmark.py` |
+| PE latencies | 1 cycle | 1 cycle | `test/pe/benchmark.py` |
+| Cycles for an isolated tile (stream of length L) | L + 2N − 2 | L + 3N − 2 (preload included) | `test/pe_array/benchmark.py` |
+| Minimum gap before reloading the weights | — | 2N − 2 cycles (FLUSH = 2N − 3) | `test/pe_array/test.py` |
+| Useful MACs per byte read from SRAM (tile, stream of 64) | 2.0 | 3.8 | `test/data_feeder/benchmark.py` |
+| Required SRAM bandwidth (tile, stream of 64) | 7.2 bytes/cycle | 3.6 bytes/cycle | `test/data_feeder/benchmark.py` |
+| Lanes lost to masking (D = 1..64, average) | 8 % | 8 % | `test/data_feeder/benchmark.py` |
+| End-to-end 16×16×16 GEMM (last result) | 448 cycles | 403 cycles | `test/output_drain/benchmark.py` |
+| Array utilisation, 16³ / 32³ GEMM | 57 % / 73 % | 64 % / 78 % | `test/output_drain/benchmark.py` |
+| Last word of Y written, 16³ GEMM (with post_processing) | cycle 451 | cycle 406 | `test/post_processing/benchmark.py` |
+| Requantization error, M on 16 bits / 8 bits | 0 / 1 int8 step | identical | `test/post_processing/benchmark.py` |
+| 64 → 32 → 16 MLP on the simulated NPU versus floating point | correlation 0.9998 | identical | `test/post_processing/benchmark.py` |
+| Reads of W for a 32³ GEMM (minimum 256) | 2048 | 256 | `test/weight_buffer/benchmark.py` |
+| Share of computation in the total time (host included), 4³ / 64³ GEMM | 50 % / 86 % | 56 % / 86 % | `test/activation_buffer/benchmark.py` |
+| 64 → 48 layer on a batch of 16 (WS worse when the batch is small) | 3652 cycles | 4812 cycles | `test/activation_buffer/benchmark.py` |
+| 64³ GEMM driven by the controller (go → done) | 19,461 cycles | 18,701 cycles | `test/controller/benchmark.py` |
+| Utilisation when K = 4 (M = N = 32) / when N = 4 (M = K = 32) | 25 % / 72 % | 75 % / 30 % | `test/controller/benchmark.py` |
+| Chip throughput, 64³ layer, host included / computation alone | 11.6 / 13.5 MACs/cycle | 12.0 / 14.0 MACs/cycle | `test/host_interface/benchmark.py` |
+| Quantized floating-point 64 → 32 → 16 MLP, on the chip through the bus | correlation 0.9999 | identical | `test/npu_top/benchmark.py` |
+| 64 → 64 layer, cycles per sample, batch of 1 / of 64 | 2446 / 353 | 3702 / 341 | `test/npu_top/benchmark.py` |
 
-Les cycles mesurés suivent exactement les formules de `src/controller/interface.md`
-(OS : `T(M)·T(N)·(K + 3N)` = 16 · 28 = 448).
+The measured cycles follow exactly the formulas of `src/controller/interface.md`
+(OS: `T(M)·T(N)·(K + 3N)` = 16 · 28 = 448).
 
-### Pistes identifiées, pas encore explorées
-- OS : recouvrir calcul et vidage (registre fantôme par PE) — le vidage et la lecture prennent 39 % des cycles d'un GEMM 16³.
-- WS : double tampon de poids pour recouvrir le préchargement (16 % des cycles d'un GEMM 16³).
-- Accumulateur réduit (22 bits suffisent pour K ≤ 64).
-- Ordre de boucles WS k_t → i_t → j, enable par PE, double buffering des SRAM.
-- DMA (v2) : le chargement par l'hôte pèse jusqu'à la moitié du temps sur les petits GEMM.
-- Bit d'échange des rôles IN / OUT : supprimerait la recopie de Y entre deux couches.
+### Identified leads, not yet explored
+- OS: overlap computation and draining (shadow register per PE) — draining and reading take 39 % of the cycles of a 16³
+  GEMM.
+- WS: double weight buffer to overlap the preload (16 % of the cycles of a 16³ GEMM).
+- Reduced accumulator (22 bits are enough for K ≤ 64).
+- WS loop order k_t → i_t → j, per-PE enable, double buffering of the SRAMs.
+- DMA (v2): loading by the host weighs up to half of the time on small GEMMs.
+- Bit swapping the IN / OUT roles: would remove the copy of Y between two layers.
 
 ---
 
-## 4. Journal des décisions
+## 4. Decision log
 
-| Date | Décision | Choix | Justification |
+| Date | Decision | Choice | Rationale |
 |---|---|---|---|
-| 2026-10-18 | Découpage en blocs | 11 blocs (section 2) | Correspondance 1:1 avec des modules Verilog |
-| 2026-10-18 | D1 Cible | Simulation → FPGA → Tiny Tapeout | Apprendre d'abord, puis confronter aux contraintes réelles |
-| 2026-10-18 | D2 Workload | GEMM générique | Noyau de tous les réseaux, périmètre maîtrisé |
-| 2026-10-18 | D3 Dataflow | OS + WS comparables | Explorer le compromis réutilisation des poids / simplicité |
-| 2026-10-18 | D4 Grille | 4×4 par défaut, paramétrable | Lisible en simulation, tiling non trivial |
-| 2026-10-18 | D5 Format | int8 signé → acc int32 | Standard de l'inférence quantifiée |
-| 2026-10-18 | D9 Contrôle | FSM câblée | Simplicité ; la mini-ISA reste une évolution possible |
-| 2026-10-18 | D6 Mémoire | Buffers W/X séparés, simple buffer | Lectures parallèles sans conflit, contrôle simple |
-| 2026-10-18 | D8 DMA | Aucun en v1, l'hôte écrit directement | Concentrer l'effort sur le cœur de calcul |
-| 2026-10-18 | D10 Post-traitement | Biais → ReLU → requant int8 | Sortie réutilisable comme entrée de la couche suivante |
-| 2026-10-18 | D12 Protocole | Contrôle centralisé | Déterministe, typique d'un systolic array |
-| 2026-10-18 | D6 Tailles | Matrices jusqu'à 64×64 | Tiling entièrement interne, taille raisonnable en simulation |
-| 2026-10-18 | D7 Interface | Bus parallèle simple | Simple en simulation, adaptable vers Wishbone ou SPI |
-| 2026-10-18 | D11 Horloge/reset | 1 clk, rst_n synchrone | Convention Tiny Tapeout, pas de CDC |
-| 2026-10-18 | D6 Layout | Tuilé, propre à chaque variante | 1 mot = 1 lecture de la grille, adresses par concaténation, Y au format X |
-| 2026-10-18 | D10 Requant | M 16 b, s 5 b, arrondi, par couche, symétrique | Bonne précision pour un multiplieur 32×16 |
-| 2026-10-18 | D7 Carte mémoire | Bus 32 b, 13 bits d'adresse (section D7) | Registres + fenêtres directes sur les buffers |
-| 2026-10-18 | D9 Boucles | OS i→j→k, WS i→k→j | Accumulateurs WS limités à 1 Kio |
-| 2026-10-18 | Bords | Masquage en lecture (0) et en écriture | Transparent pour l'hôte, quelques comparateurs |
-| 2026-10-18 | pe OS | `clear` diffusé à tous les PE, prioritaire | Remise à zéro simple, sans signal qui suit les données |
-| 2026-10-18 | pe WS | Poids préchargés par décalage vertical (`load`) | Pas de bus d'écriture vers chaque PE |
-| 2026-10-18 | OS : vidage | Pas de recouvrement calcul / vidage, période K + 3N | Simplicité ; un registre fantôme par PE permettrait de recouvrir (à explorer) |
-| 2026-10-18 | WS : flush | 2N − 3 cycles avant le préchargement suivant, période N_dim + 3N − 3 | Limite exacte, **confirmée en simulation** : avec un cycle de moins, la dernière colonne est fausse (`test/pe_array/test.py`) |
-| 2026-10-18 | data_feeder | Il aligne les commandes (+1 cycle), masque et décale | Le `controller` émet tout au même cycle d'émission |
-| 2026-10-18 | Mémoires | SRAM simple port, lecture synchrone L = 1, choix du port par `busy` | Réaliste pour un ASIC ou une BRAM ; deux bancs IN / OUT pour les activations |
-| 2026-10-18 | Tag | 20 bits `{y_addr, lane_mask, row}` qui voyagent avec les résultats | L'écriture de Y n'a pas besoin du `controller` |
-| 2026-10-18 | output_drain WS | Redressement + ligne à retard de 2N cycles + mémoire d'accumulateurs à lecture combinatoire | Lecture-modification-écriture en un cycle (simple en simulation, à pipeliner pour un ASIC) |
-| 2026-10-18 | post_processing | Pipeline de 3 étages, N voies, biais en N bancs | Débit d'une entrée par cycle ; un biais par voie en WS, un seul diffusé en OS |
-| 2026-10-18 | host_interface | Latence de lecture 1 partout, reset REQ_MULT = 1, `irq = DONE` | Comportement uniforme ; requantification neutre par défaut |
-| 2026-10-18 | Dimensions invalides | 0 ou > 64 : `done` immédiat, rien n'est calculé | Comportement défini plutôt que non défini |
-| 2026-10-18 | Implémentation | py4hw comportemental (`clock()` / `propagate()`), une classe par variante | Code lisible, proche de la spécification ; la transcription en Verilog se fait à la main |
-| 2026-10-18 | output_drain OS | N passé en paramètre explicite | N ne se déduit pas de la largeur de `drain_row` quand N n'est pas une puissance de 2 |
-| 2026-10-18 | controller | Machine de Moore ; `busy` = 0 pendant DONE ; `cycles` = cycles hors IDLE depuis `go`, DONE compris | Pendant DONE la dernière écriture de Y est terminée : l'hôte peut relire dès `done` |
-| 2026-10-18 | controller | Sorties publiées dans `clock()`, pas de `propagate()` | Évite une fausse boucle combinatoire host_interface ⇄ controller dans le simulateur |
-| 2026-10-18 | host_interface | « Occupé » = `busy` OU impulsion `go` en cours ; accès mémoire et configuration ignorés quand occupé | Sans cela, un accès juste après GO passait avant le début du calcul (trouvé par les tests de npu_top) |
+| 2026-10-18 | Split into blocks | 11 blocks (section 2) | 1:1 correspondence with Verilog modules |
+| 2026-10-18 | D1 Target | Simulation → FPGA → Tiny Tapeout | Learn first, then confront real constraints |
+| 2026-10-18 | D2 Workload | Generic GEMM | Kernel of every network, controlled scope |
+| 2026-10-18 | D3 Dataflow | Comparable OS + WS | Explore the weight reuse / simplicity trade-off |
+| 2026-10-18 | D4 Array | 4×4 by default, parameterisable | Readable in simulation, non-trivial tiling |
+| 2026-10-18 | D5 Format | signed int8 → int32 acc | Standard for quantized inference |
+| 2026-10-18 | D9 Control | Hardwired FSM | Simplicity; the mini-ISA remains a possible evolution |
+| 2026-10-18 | D6 Memory | Separate W/X buffers, single buffer | Parallel reads without conflict, simple control |
+| 2026-10-18 | D8 DMA | None in v1, the host writes directly | Focus the effort on the compute core |
+| 2026-10-18 | D10 Post-processing | Bias → ReLU → int8 requant | Output reusable as the input of the next layer |
+| 2026-10-18 | D12 Protocol | Centralised control | Deterministic, typical of a systolic array |
+| 2026-10-18 | D6 Sizes | Matrices up to 64×64 | Tiling entirely internal, reasonable size in simulation |
+| 2026-10-18 | D7 Interface | Simple parallel bus | Simple in simulation, adaptable to Wishbone or SPI |
+| 2026-10-18 | D11 Clock/reset | 1 clk, synchronous rst_n | Tiny Tapeout convention, no CDC |
+| 2026-10-18 | D6 Layout | Tiled, specific to each variant | 1 word = 1 read of the array, addresses by concatenation, Y in X format |
+| 2026-10-18 | D10 Requant | M 16 b, s 5 b, rounding, per layer, symmetric | Good precision for a 32×16 multiplier |
+| 2026-10-18 | D7 Memory map | 32 b bus, 13 address bits (section D7) | Registers + direct windows onto the buffers |
+| 2026-10-18 | D9 Loops | OS i→j→k, WS i→k→j | WS accumulators limited to 1 KiB |
+| 2026-10-18 | Edges | Masking on read (0) and on write | Transparent for the host, a few comparators |
+| 2026-10-18 | pe OS | `clear` broadcast to all PEs, with priority | Simple reset to zero, without a signal that follows the data |
+| 2026-10-18 | pe WS | Weights preloaded by vertical shifting (`load`) | No write bus to each PE |
+| 2026-10-18 | OS: draining | No computation / draining overlap, period K + 3N | Simplicity; a shadow register per PE would allow overlapping (to be explored) |
+| 2026-10-18 | WS: flush | 2N − 3 cycles before the next preload, period N_dim + 3N − 3 | Exact limit, **confirmed in simulation**: with one cycle less, the last column is wrong (`test/pe_array/test.py`) |
+| 2026-10-18 | data_feeder | It aligns the commands (+1 cycle), masks and skews | The `controller` emits everything at the same emission cycle |
+| 2026-10-18 | Memories | Single-port SRAM, synchronous read L = 1, port selected by `busy` | Realistic for an ASIC or a BRAM; two IN / OUT banks for the activations |
+| 2026-10-18 | Tag | 20 bits `{y_addr, lane_mask, row}` travelling with the results | Writing Y does not need the `controller` |
+| 2026-10-18 | output_drain WS | Deskewing + 2N-cycle delay line + accumulator memory with combinational read | Read-modify-write in one cycle (simple in simulation, to be pipelined for an ASIC) |
+| 2026-10-18 | post_processing | 3-stage pipeline, N lanes, biases in N banks | Throughput of one input per cycle; one bias per lane in WS, a single broadcast one in OS |
+| 2026-10-18 | host_interface | Read latency 1 everywhere, reset REQ_MULT = 1, `irq = DONE` | Uniform behaviour; neutral requantization by default |
+| 2026-10-18 | Invalid dimensions | 0 or > 64: immediate `done`, nothing is computed | Defined rather than undefined behaviour |
+| 2026-10-18 | Implementation | Behavioural py4hw (`clock()` / `propagate()`), one class per variant | Readable code, close to the specification; the transcription into Verilog is done by hand |
+| 2026-10-18 | output_drain OS | N passed as an explicit parameter | N cannot be deduced from the width of `drain_row` when N is not a power of 2 |
+| 2026-10-18 | controller | Moore machine; `busy` = 0 during DONE; `cycles` = cycles outside IDLE since `go`, DONE included | During DONE the last write of Y is finished: the host can read back as soon as `done` is raised |
+| 2026-10-18 | controller | Outputs published in `clock()`, no `propagate()` | Avoids a false combinational loop host_interface ⇄ controller in the simulator |
+| 2026-10-18 | host_interface | "Busy" = `busy` OR `go` pulse in progress; memory and configuration accesses ignored when busy | Without this, an access right after GO went through before the computation started (found by the npu_top tests) |
+| 2026-10-18 | Language | The whole repository translated into English: documentation, code and identifiers, comments, messages, figures | Readable by a wider audience on the public repository |
 
 ---
 
-## 5. Conventions d'interface
+## 5. Interface conventions
 
-Ces règles s'appliquent à tous les fichiers `src/<bloc>/interface.md`.
+These rules apply to all the `src/<block>/interface.md` files.
 
-### 5.1 Paramètres communs
-| Nom | Défaut | Définition | Rôle |
+### 5.1 Common parameters
+| Name | Default | Definition | Role |
 |---|---|---|---|
-| `DATAFLOW` | OS | OS ou WS | variante du cœur de calcul, fixée à la construction (ce n'est pas un registre) |
-| `N` | 4 | — | côté de la grille ; nombre de voies |
-| `DW` | 8 | — | largeur d'une donnée (int8 signé) |
-| `AW` | 32 | — | largeur d'un accumulateur ou d'une somme partielle (int32 signé) |
-| `DIM_MAX` | 64 | — | dimension maximale de M, K et N |
-| `IW` | 6 | log2(DIM_MAX) | largeur d'un indice d'élément (i, j, k) |
-| `TW` | 4 | log2(DIM_MAX / N) | largeur d'un indice de tuile (i_t, j_t, k_t) |
-| `BAW` | 10 | TW + IW | largeur d'une adresse de mot dans un buffer |
-| `DIMW` | 7 | log2(DIM_MAX) + 1 | largeur des registres de dimensions (de 1 à 64) |
-| `TAG_W` | 20 | BAW + N + IW | largeur du tag |
+| `DATAFLOW` | OS | OS or WS | variant of the compute core, fixed at construction time (it is not a register) |
+| `N` | 4 | — | side of the array; number of lanes |
+| `DW` | 8 | — | width of a data word (signed int8) |
+| `AW` | 32 | — | width of an accumulator or of a partial sum (signed int32) |
+| `DIM_MAX` | 64 | — | maximum dimension of M, K and N |
+| `IW` | 6 | log2(DIM_MAX) | width of an element index (i, j, k) |
+| `TW` | 4 | log2(DIM_MAX / N) | width of a tile index (i_t, j_t, k_t) |
+| `BAW` | 10 | TW + IW | width of a word address in a buffer |
+| `DIMW` | 7 | log2(DIM_MAX) + 1 | width of the dimension registers (from 1 to 64) |
+| `TAG_W` | 20 | BAW + N + IW | width of the tag |
 
-Les blocs du cœur de calcul restent paramétrables en N. La v1 de `host_interface` et de `npu_top`
-suppose N = 4, puisqu'un mot de buffer fait alors 32 bits, la largeur du bus.
+The blocks of the compute core remain parameterisable in N. The v1 of `host_interface` and `npu_top` assumes N = 4,
+since a buffer word is then 32 bits wide, the width of the bus.
 
-### 5.2 Nommage et conventions de signaux
-- Les signaux sont en `snake_case`. Ils sont actifs à 1, sauf `rst_n`.
-- Tous les blocs séquentiels reçoivent `clk` et `rst_n` (reset synchrone actif bas, D11).
-  Le contenu des mémoires n'est pas réinitialisé.
-- Les données sont en complément à deux : int8 pour les données, int32 pour les accumulateurs.
-- Suffixes : `_addr` (adresse), `_we` / `_re` (autorisation d'écriture / de lecture), `_wdata` / `_rdata` (données),
-  `_mask` (un bit par voie), `_valid` (la donnée qui accompagne ce bit est utilisable).
-- Côté grille, les ports sont nommés par point cardinal : `_west`, `_north`, `_south`.
-- **Rangement des voies** : un vecteur de N éléments de W bits est empaqueté, la voie `l` occupant les bits
-  `[W·l + W−1 : W·l]`. La voie 0 est donc dans les bits de poids faible. C'est aussi l'ordre des octets dans un mot mémoire (D6).
-- Une matrice de N×N éléments (`acc` en OS) est rangée ligne par ligne : l'élément (i, j) est à l'indice `i·N + j`.
+### 5.2 Naming and signal conventions
+- Signals are in `snake_case`. They are active high, except `rst_n`.
+- All sequential blocks receive `clk` and `rst_n` (synchronous active-low reset, D11).
+  The contents of the memories are not reset.
+- Data are in two's complement: int8 for the data, int32 for the accumulators.
+- Suffixes: `_addr` (address), `_we` / `_re` (write / read enable), `_wdata` / `_rdata` (data), `_mask` (one bit per
+  lane), `_valid` (the data accompanying this bit can be used).
+- On the array side, the ports are named after the cardinal points: `_west`, `_north`, `_south`.
+- **Lane ordering**: a vector of N elements of W bits is packed, lane `l` occupying bits `[W·l + W−1 : W·l]`. Lane 0
+  is therefore in the least significant bits. This is also the order of the bytes in a memory word (D6).
+- A matrix of N×N elements (`acc` in OS) is stored row by row: element (i, j) is at index `i·N + j`.
 
-### 5.3 Latence et cycle d'émission
-- **Latence L = n** : une entrée présente pendant le cycle t produit son effet en sortie pendant le cycle t + n.
-  L = 0 désigne un chemin combinatoire.
-- Une écriture demandée pendant le cycle t est effective au front de fin de ce cycle : la donnée est lisible dès t + 1.
-- **Mémoires** : la lecture est synchrone, avec L = 1. `rdata` est valide au cycle qui suit `re`.
-- **Cycle d'émission** : c'est le cycle où le `controller` présente une adresse SRAM et toutes les commandes qui vont
-  avec (masques, `ctl`, sideband, tag). Ce cycle sert de référence à tous les chronogrammes.
-  Chaque bloc placé après la SRAM retarde ses commandes d'autant que les données : le `data_feeder` ajoute 1 cycle,
-  la ligne à retard de `output_drain` (WS) ajoute 2N cycles.
-- **Contrôle centralisé** (D12) : il n'y a pas de handshake. Chaque latence est fixe et connue du `controller`.
+### 5.3 Latency and emission cycle
+- **Latency L = n**: an input present during cycle t produces its effect on the output during cycle t + n.
+  L = 0 denotes a combinational path.
+- A write requested during cycle t takes effect at the edge ending that cycle: the data can be read from t + 1 onwards.
+- **Memories**: the read is synchronous, with L = 1. `rdata` is valid in the cycle following `re`.
+- **Emission cycle**: this is the cycle in which the `controller` presents an SRAM address and all the commands that go
+  with it (masks, `ctl`, sideband, tag). This cycle is the reference for all the timing diagrams.
+  Each block placed after the SRAM delays its commands by as much as the data: the `data_feeder` adds 1 cycle, the
+  delay line of `output_drain` (WS) adds 2N cycles.
+- **Centralised control** (D12): there is no handshake. Each latency is fixed and known to the `controller`.
 
 ### 5.4 Tag
-Le tag accompagne chaque groupe de N résultats, de `output_drain` jusqu'à l'écriture dans `activation_buffer`.
+The tag accompanies each group of N results, from `output_drain` up to the write into `activation_buffer`.
 
-| Bits | Champ | Largeur | Contenu |
+| Bits | Field | Width | Contents |
 |---|---|---|---|
-| [19:10] | `y_addr` | BAW | adresse du mot Y dans le banc OUT (OS : `{j_t, i}` · WS : `{i_t, j}`) |
-| [9:6] | `lane_mask` | N | autorisation d'écriture de chaque voie (0 hors limites) |
-| [5:0] | `row` | IW | indice de ligne pour le biais (OS : i · WS : 4·i_t) |
+| [19:10] | `y_addr` | BAW | address of the Y word in the OUT bank (OS: `{j_t, i}` · WS: `{i_t, j}`) |
+| [9:6] | `lane_mask` | N | write enable of each lane (0 when out of bounds) |
+| [5:0] | `row` | IW | row index for the bias (OS: i · WS: 4·i_t) |
 
-### 5.5 Récapitulatif des latences
-| Chemin | Latence |
+### 5.5 Summary of the latencies
+| Path | Latency |
 |---|---|
-| Émission → voie l à l'entrée de la grille (flux décalé) | 1 + l |
-| Émission → `w_north` en WS (préchargement) | 1 |
-| `pe` : entrée → sortie | 1 |
-| `output_drain` OS : `drain_en` → `res_valid` | 1 |
-| `output_drain` WS : émission de X → `res_valid` | 2N + 1 |
-| `post_processing` : `res_valid` → `y_we` | 3 |
-| Bus hôte : `bus_re` → `bus_rdata` | 1 |
+| Emission → lane l at the input of the array (skewed stream) | 1 + l |
+| Emission → `w_north` in WS (preload) | 1 |
+| `pe`: input → output | 1 |
+| `output_drain` OS: `drain_en` → `res_valid` | 1 |
+| `output_drain` WS: emission of X → `res_valid` | 2N + 1 |
+| `post_processing`: `res_valid` → `y_we` | 3 |
+| Host bus: `bus_re` → `bus_rdata` | 1 |

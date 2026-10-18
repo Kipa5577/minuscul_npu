@@ -1,106 +1,106 @@
 # minuscul_npu
 
-Un petit NPU (*Neural Processing Unit*, accélérateur de réseaux de neurones) conçu pour **apprendre** : comprendre
-comment fonctionne une vraie puce d'inférence, de la multiplication-accumulation jusqu'au bus de l'hôte, et
-**mesurer ses compromis d'architecture** au lieu de les deviner.
+A small NPU (*Neural Processing Unit*, a neural network accelerator) designed for **learning**: understanding how a
+real inference chip works, from multiply-accumulate all the way to the host bus, and **measuring its architectural
+trade-offs** instead of guessing them.
 
-Le NPU est prototypé et simulé en Python avec [py4hw](https://pypi.org/project/py4hw/), au cycle près. Chaque bloc a
-sa spécification, ses tests, ses mesures et une animation qui le montre fonctionner cycle par cycle. Une fois
-l'architecture arrêtée, le design est transcrit à la main en Verilog, d'abord pour FPGA, puis pour
+The NPU is prototyped and simulated in Python with [py4hw](https://pypi.org/project/py4hw/), cycle-accurate. Each
+block has its specification, its tests, its measurements and an animation that shows it working cycle by cycle. Once
+the architecture is settled, the design is transcribed by hand into Verilog, first for FPGA, then for
 [Tiny Tapeout](https://tinytapeout.com/).
 
-> **État : v1 complète.** La puce, pilotée uniquement par son bus de 32 bits, calcule des couches de réseau de
-> neurones justes dans ses deux variantes, enchaîne les couches et exécute un petit réseau quantifié qui reproduit
-> le calcul en virgule flottante (corrélation 0,9999). 96 tests, 10 benchmarks, 10 animations.
+> **Status: v1 complete.** The chip, driven only through its 32-bit bus, computes correct neural network layers in
+> both of its variants, chains layers and runs a small quantized network that reproduces the floating-point
+> computation (correlation 0.9999). 96 tests, 10 benchmarks, 10 animations.
 
 ---
 
-## Sommaire
+## Contents
 
-1. [Ce que calcule le NPU](#ce-que-calcule-le-npu)
-2. [Comment ça marche](#comment-ça-marche)
-3. [Les deux variantes : output-stationary et weight-stationary](#les-deux-variantes--output-stationary-et-weight-stationary)
-4. [Architecture de la puce](#architecture-de-la-puce)
-5. [Programmer la puce](#programmer-la-puce)
-6. [Résultats mesurés](#résultats-mesurés)
-7. [Organisation du dépôt](#organisation-du-dépôt)
+1. [What the NPU computes](#what-the-npu-computes)
+2. [How it works](#how-it-works)
+3. [The two variants: output-stationary and weight-stationary](#the-two-variants-output-stationary-and-weight-stationary)
+4. [Chip architecture](#chip-architecture)
+5. [Programming the chip](#programming-the-chip)
+6. [Measured results](#measured-results)
+7. [Repository layout](#repository-layout)
 8. [Installation](#installation)
-9. [Tests, benchmarks et animations](#tests-benchmarks-et-animations)
-10. [Méthode de travail](#méthode-de-travail)
-11. [Feuille de route](#feuille-de-route)
-12. [Contribuer](#contribuer)
-13. [Licence](#licence)
+9. [Tests, benchmarks and animations](#tests-benchmarks-and-animations)
+10. [Working method](#working-method)
+11. [Roadmap](#roadmap)
+12. [Contributing](#contributing)
+13. [License](#license)
 
 ---
 
-## Ce que calcule le NPU
+## What the NPU computes
 
-Plus de 90 % du calcul d'un réseau de neurones est un **produit de matrices**. Le NPU calcule une couche complète,
-quantifiée en entiers :
+More than 90 % of the computation of a neural network is a **matrix product**. The NPU computes a complete layer,
+quantized to integers:
 
 ```
 Y = requant( ReLU( W · X + b ) )
 ```
 
-| Élément | Format | Taille |
+| Element | Format | Size |
 |---|---|---|
-| W : poids | int8 signé | M × K |
-| X : activations d'entrée | int8 signé | K × N |
-| b : biais | int32 signé | M |
-| accumulation | int32 signé | — |
-| Y : activations de sortie | int8 signé | M × N |
+| W: weights | signed int8 | M × K |
+| X: input activations | signed int8 | K × N |
+| b: biases | signed int32 | M |
+| accumulation | signed int32 | — |
+| Y: output activations | signed int8 | M × N |
 
-- M, K et N vont de 1 à 64, sans contrainte de multiple : les bords sont gérés par masquage.
-- La **requantification** ramène l'accumulateur int32 en int8 : `y = sat8((x · M_q + 2^(s−1)) >> s)`, avec un
-  multiplicateur `M_q` sur 16 bits, un décalage `s` sur 5 bits et un arrondi au plus proche.
-- La quantification est symétrique (point zéro = 0). Une convolution se ramène à ce calcul par im2col, côté hôte.
-- Y sort dans le même format que X : la sortie d'une couche sert directement d'entrée à la suivante.
+- M, K and N range from 1 to 64, with no multiple constraint: the edges are handled by masking.
+- **Requantization** brings the int32 accumulator back to int8: `y = sat8((x · M_q + 2^(s−1)) >> s)`, with a 16-bit
+  multiplier `M_q`, a 5-bit shift `s` and round-to-nearest.
+- The quantization is symmetric (zero point = 0). A convolution can be reduced to this computation by im2col, on the
+  host side.
+- Y comes out in the same format as X: the output of one layer is directly used as the input of the next.
 
-## Comment ça marche
+## How it works
 
-Un processeur classique passe l'essentiel de son énergie à **déplacer** les données, pas à calculer. Un NPU est
-une machine à **réutiliser** chaque donnée lue le plus de fois possible avant de la jeter.
+A conventional processor spends most of its energy **moving** data, not computing. An NPU is a machine for
+**reusing** each piece of data it reads as many times as possible before discarding it.
 
-Le cœur du NPU est une **grille systolique** de 4×4 *processing elements* (PE). Chaque PE fait une
-multiplication-accumulation int8 × int8 → int32 par cycle et ne parle qu'à ses voisins immédiats. Les données
-« pulsent » de PE en PE : une valeur lue une fois en mémoire sert à 4 MAC en traversant la grille. Pour que les bonnes
-valeurs se rencontrent au bon PE, les données entrent **en escalier** : la voie l est retardée de l cycles.
+The heart of the NPU is a **systolic array** of 4×4 *processing elements* (PEs). Each PE performs one int8 × int8 →
+int32 multiply-accumulate per cycle and only talks to its immediate neighbours. The data "pulse" from PE to PE: a
+value read once from memory feeds 4 MACs as it crosses the array. For the right values to meet at the right PE, the
+data enter **in a staircase**: lane l is delayed by l cycles.
 
 ```
-            x0       x1       x2       x3          ← activations, décalées dans le temps
+            x0       x1       x2       x3          ← activations, skewed in time
             ↓        ↓        ↓        ↓
    w0 →  [ PE ] → [ PE ] → [ PE ] → [ PE ]
             ↓        ↓        ↓        ↓
-   w1 →  [ PE ] → [ PE ] → [ PE ] → [ PE ]        16 MAC par cycle au maximum
+   w1 →  [ PE ] → [ PE ] → [ PE ] → [ PE ]        16 MACs per cycle at most
             ↓        ↓        ↓        ↓
    ...
 ```
 
-Une matrice plus grande que la grille est découpée en **tuiles** de 4×4, que le séquenceur (`controller`)
-parcourt une à une.
+A matrix larger than the array is cut into 4×4 **tiles**, which the sequencer (`controller`) walks through one by one.
 
-## Les deux variantes : output-stationary et weight-stationary
+## The two variants: output-stationary and weight-stationary
 
-La question centrale d'un NPU est : *quelle donnée reste immobile dans le PE ?* Le projet implémente les deux
-réponses classiques derrière la même interface, pour les comparer chiffres à l'appui.
+The central question of an NPU is: *which piece of data stays still in the PE?* The project implements the two
+classic answers behind the same interface, to compare them with figures to back it up.
 
 | | Output-stationary (OS) | Weight-stationary (WS) |
 |---|---|---|
-| Reste dans le PE | l'accumulateur int32 | le poids int8 (préchargé) |
-| Circule entre les PE | W vers l'est, X vers le sud (8 bits) | X vers l'est, sommes partielles vers le sud (32 bits) |
-| Fin d'une tuile | on lit les accumulateurs ligne par ligne | les résultats sortent en escalier au sud |
-| Réutilisation | W et X relus pour chaque tuile | chaque poids lu une seule fois par GEMM |
-| Avantage mesuré | K grand, N petit, petits lots | N grand, gros lots |
+| Stays in the PE | the int32 accumulator | the int8 weight (preloaded) |
+| Flows between the PEs | W to the east, X to the south (8 bits) | X to the east, partial sums to the south (32 bits) |
+| End of a tile | the accumulators are read row by row | the results come out in a staircase at the south |
+| Reuse | W and X read again for each tile | each weight read only once per GEMM |
+| Measured advantage | large K, small N, small batches | large N, large batches |
 
-La variante est choisie à la construction de la puce (`dataflow='OS'` ou `'WS'`). Les deux produisent exactement
-le même Y, bit pour bit.
+The variant is chosen when the chip is constructed (`dataflow='OS'` or `'WS'`). Both produce exactly the same Y, bit
+for bit.
 
-## Architecture de la puce
+## Chip architecture
 
 ```
- Hôte ◄──► host_interface ──► controller ──────────────── (contrôle vers tous les blocs)
+ Host ◄──► host_interface ──► controller ──────────────── (control to all blocks)
                                    │
- Mém. ext. ◄──► dma (v2) ──► weight_buffer ──────┐
+ Ext. mem. ◄──► dma (v2) ──► weight_buffer ──────┐
                          └──► activation_buffer ─┼──► data_feeder ──► pe_array (N×N pe)
                                       ▲          │                        │
                                       │          │                  output_drain
@@ -108,62 +108,63 @@ le même Y, bit pour bit.
                                       └──────────┴──────────────── post_processing
 ```
 
-| Bloc | Rôle |
+| Block | Role |
 |---|---|
-| `pe` | Processing element : multiplication-accumulation int8 → int32, registres de passage vers les voisins |
-| `pe_array` | Grille N×N de PE (4×4 par défaut, paramétrable) |
-| `data_feeder` | Aligne les commandes sur la mémoire, masque les voies hors limites, crée l'escalier systolique |
-| `output_drain` | Récupère les résultats de la grille ; en WS, additionne les sommes partielles des tuiles de K |
-| `post_processing` | Biais → ReLU → requantification int8, sur 4 voies en parallèle ; mémoire des biais |
-| `weight_buffer` | SRAM des poids (4 Kio) |
-| `activation_buffer` | SRAM des activations : banc IN (X) et banc OUT (Y), 4 Kio chacun |
-| `controller` | FSM qui parcourt les tuiles et émet adresses, masques et commandes, au cycle près |
-| `host_interface` | Bus de 32 bits, registres de configuration et de statut, fenêtres sur les mémoires |
-| `npu_top` | Assemblage : la puce complète, vue de l'extérieur par son bus et sa ligne d'interruption |
+| `pe` | Processing element: int8 → int32 multiply-accumulate, pass-through registers to the neighbours |
+| `pe_array` | N×N array of PEs (4×4 by default, parameterisable) |
+| `data_feeder` | Aligns the commands with the memory, masks out-of-bounds lanes, creates the systolic staircase |
+| `output_drain` | Collects the results from the array; in WS, adds up the partial sums of the K tiles |
+| `post_processing` | Bias → ReLU → int8 requantization, on 4 lanes in parallel; bias memory |
+| `weight_buffer` | Weight SRAM (4 KiB) |
+| `activation_buffer` | Activation SRAM: IN bank (X) and OUT bank (Y), 4 KiB each |
+| `controller` | FSM that walks through the tiles and emits addresses, masks and commands, to the exact cycle |
+| `host_interface` | 32-bit bus, configuration and status registers, windows onto the memories |
+| `npu_top` | Assembly: the complete chip, seen from the outside through its bus and its interrupt line |
 
-Choix principaux (détaillés et justifiés dans [`src/architecture.md`](src/architecture.md)) :
-- un seul domaine d'horloge, avec un reset synchrone actif bas ;
-- un contrôle centralisé et déterministe : chaque latence est fixe et connue du `controller`, sans handshake ;
-- des mémoires simple port à lecture synchrone : l'hôte y accède quand la puce est au repos, le cœur pendant le calcul ;
-- un tag de 20 bits (adresse de Y, masque d'écriture, ligne) qui voyage avec chaque groupe de résultats, pour que
-  l'écriture de Y n'ait pas besoin du `controller`.
+Main choices (detailed and justified in [`src/architecture.md`](src/architecture.md)):
+- a single clock domain, with a synchronous active-low reset;
+- centralised, deterministic control: each latency is fixed and known to the `controller`, with no handshake;
+- single-port memories with synchronous read: the host accesses them when the chip is idle, the core during the
+  computation;
+- a 20-bit tag (Y address, write mask, row) that travels with each group of results, so that writing Y does not need
+  the `controller`.
 
-## Programmer la puce
+## Programming the chip
 
-### Carte mémoire (adresses de mots de 32 bits)
+### Memory map (addresses of 32-bit words)
 
-| Adresse | Nom | Accès | Contenu |
+| Address | Name | Access | Contents |
 |---|---|---|---|
-| `0x0000` | `ID` | lecture | taille de grille, variante (0 = OS, 1 = WS), `DIM_MAX`, version |
-| `0x0001` | `CTRL` | lecture / écriture | bit 0 `GO` (lance le calcul), bit 1 `RELU_EN` |
-| `0x0002` | `STATUS` | lecture | bit 0 `BUSY`, bit 1 `DONE` (aussi sur la ligne `irq`) |
-| `0x0003`–`0x0005` | `DIM_M`, `DIM_K`, `DIM_N` | lecture / écriture | dimensions, de 1 à 64 |
-| `0x0006` | `REQ_MULT` | lecture / écriture | multiplicateur de requantification (16 bits) |
-| `0x0007` | `REQ_SHIFT` | lecture / écriture | décalage de requantification (5 bits) |
-| `0x0008` | `CYCLES` | lecture | durée du dernier calcul, en cycles |
-| `0x0400`–`0x07FF` | `WEIGHT` | lecture / écriture | mémoire des poids |
-| `0x0800`–`0x0BFF` | `ACT_IN` | lecture / écriture | activations d'entrée X |
-| `0x0C00`–`0x0FFF` | `ACT_OUT` | lecture / écriture | activations de sortie Y |
-| `0x1000`–`0x103F` | `BIAS` | lecture / écriture | biais int32 |
+| `0x0000` | `ID` | read | array size, variant (0 = OS, 1 = WS), `DIM_MAX`, version |
+| `0x0001` | `CTRL` | read / write | bit 0 `GO` (starts the computation), bit 1 `RELU_EN` |
+| `0x0002` | `STATUS` | read | bit 0 `BUSY`, bit 1 `DONE` (also on the `irq` line) |
+| `0x0003`–`0x0005` | `DIM_M`, `DIM_K`, `DIM_N` | read / write | dimensions, from 1 to 64 |
+| `0x0006` | `REQ_MULT` | read / write | requantization multiplier (16 bits) |
+| `0x0007` | `REQ_SHIFT` | read / write | requantization shift (5 bits) |
+| `0x0008` | `CYCLES` | read | duration of the last computation, in cycles |
+| `0x0400`–`0x07FF` | `WEIGHT` | read / write | weight memory |
+| `0x0800`–`0x0BFF` | `ACT_IN` | read / write | input activations X |
+| `0x0C00`–`0x0FFF` | `ACT_OUT` | read / write | output activations Y |
+| `0x1000`–`0x103F` | `BIAS` | read / write | int32 biases |
 
-Un mot de mémoire contient 4 valeurs int8. La façon de ranger W, X et Y en mots dépend de la variante : elle est
-décrite dans `src/architecture.md` (D6) et implémentée côté hôte dans [`test/layout.py`](test/layout.py). Pendant un
-calcul, les accès aux mémoires et les écritures de configuration sont ignorés ; les registres restent lisibles.
+A memory word holds 4 int8 values. The way W, X and Y are stored in words depends on the variant: it is described in
+`src/architecture.md` (D6) and implemented on the host side in [`test/layout.py`](test/layout.py). During a
+computation, memory accesses and configuration writes are ignored; the registers remain readable.
 
-### Séquence pour une couche
+### Sequence for one layer
 
-1. Écrire W dans `WEIGHT`, X dans `ACT_IN` et b dans `BIAS`.
-2. Écrire `DIM_M`, `DIM_K`, `DIM_N`, `REQ_MULT` et `REQ_SHIFT`.
-3. Écrire `CTRL = GO | RELU_EN`.
-4. Attendre `irq`, ou lire `STATUS.DONE` en boucle.
-5. Lire Y dans `ACT_OUT`, et `CYCLES` pour la mesure.
+1. Write W into `WEIGHT`, X into `ACT_IN` and b into `BIAS`.
+2. Write `DIM_M`, `DIM_K`, `DIM_N`, `REQ_MULT` and `REQ_SHIFT`.
+3. Write `CTRL = GO | RELU_EN`.
+4. Wait for `irq`, or poll `STATUS.DONE`.
+5. Read Y from `ACT_OUT`, and `CYCLES` for the measurement.
 
-Pour la couche suivante, il suffit de recopier les mots de Y de `ACT_OUT` vers `ACT_IN`.
+For the next layer, it is enough to copy the words of Y from `ACT_OUT` to `ACT_IN`.
 
-### En Python, sur la puce simulée
+### In Python, on the simulated chip
 
-La classe `Npu` de [`test/npu_top/test.py`](test/npu_top/test.py) est le logiciel hôte de référence. Elle ne connaît
-que le bus et la carte mémoire. Depuis la racine du dépôt :
+The class `Npu` in [`test/npu_top/test.py`](test/npu_top/test.py) is the reference host software. It knows only the
+bus and the memory map. From the root of the repository:
 
 ```python
 import sys
@@ -172,71 +173,71 @@ from common import load_test_module
 import numpy as np
 
 npu_test = load_test_module('npu_top')
-npu = npu_test.Npu('OS')                      # ou 'WS'
+npu = npu_test.Npu('OS')                      # or 'WS'
 
 rng = np.random.default_rng(0)
-W = rng.integers(-128, 128, (16, 32))         # poids int8, M×K
-X = rng.integers(-128, 128, (32, 8))          # activations int8, K×N
-b = list(rng.integers(-1000, 1000, 16))       # biais int32, un par ligne de Y
+W = rng.integers(-128, 128, (16, 32))         # int8 weights, M×K
+X = rng.integers(-128, 128, (32, 8))          # int8 activations, K×N
+b = list(rng.integers(-1000, 1000, 16))       # int32 biases, one per row of Y
 
 Y, cycles, phases = npu.gemm(W, X, b, mult=300, shift=16, relu=True)
 print(Y.shape, cycles, phases)
-# (16, 8) 357 {'chargement': 213, 'calcul': 360, 'relecture': 33}
+# (16, 8) 357 {'loading': 213, 'compute': 360, 'readback': 33}
 ```
 
-## Résultats mesurés
+## Measured results
 
-Toutes les valeurs viennent de la simulation (grille 4×4). La liste complète, avec le fichier qui produit chaque
-mesure, est dans `src/architecture.md` (section 3b).
+All the values come from the simulation (4×4 array). The complete list, with the file that produces each measurement,
+is in `src/architecture.md` (section 3b).
 
-| Mesure | OS | WS |
+| Measurement | OS | WS |
 |---|---|---|
-| GEMM 64×64×64, calcul seul (go → done) | 19 461 cycles | 18 701 cycles |
-| Débit d'une couche 64³, calcul seul / transferts de l'hôte compris | 13,5 / 11,6 MAC/cycle | 14,0 / 12,0 MAC/cycle |
-| Utilisation des PE quand K = 4 (M = N = 32) | 25 % | 75 % |
-| Utilisation des PE quand N = 4 (M = K = 32) | 72 % | 30 % |
-| MAC utiles par octet lu en mémoire (tuile, flux de 64) | 2,0 | 3,8 |
-| Lectures de W pour un GEMM 32³ (minimum : 256) | 2 048 | 256 |
-| Couche 64 → 64 : cycles par échantillon, lot de 1 / lot de 64 | 2 446 / 353 | 3 702 / 341 |
-| MLP 64 → 32 → 16 quantifié, comparé au calcul flottant | corrélation 0,9999 | identique |
+| 64×64×64 GEMM, computation alone (go → done) | 19,461 cycles | 18,701 cycles |
+| Throughput of a 64³ layer, computation alone / host transfers included | 13.5 / 11.6 MACs/cycle | 14.0 / 12.0 MACs/cycle |
+| PE utilisation when K = 4 (M = N = 32) | 25 % | 75 % |
+| PE utilisation when N = 4 (M = K = 32) | 72 % | 30 % |
+| Useful MACs per byte read from memory (tile, stream of 64) | 2.0 | 3.8 |
+| Reads of W for a 32³ GEMM (minimum: 256) | 2,048 | 256 |
+| 64 → 64 layer: cycles per sample, batch of 1 / batch of 64 | 2,446 / 353 | 3,702 / 341 |
+| Quantized 64 → 32 → 16 MLP, compared with the floating-point computation | correlation 0.9999 | identical |
 
-Ce que ces chiffres enseignent :
-- **Aucune variante ne gagne partout.** Selon la forme du GEMM, l'une est jusqu'à 3,4 fois plus rapide que l'autre
-  (carte de décision dans `test/controller/benchmark.py`).
-- **WS réutilise mieux les données** : chaque poids n'est lu qu'une fois, et il faut 2 fois moins de débit mémoire.
-- **Sans DMA, l'hôte coûte cher** : sur une petite couche, le chargement et la relecture prennent plus de la moitié
-  du temps total.
-- **L'accumulateur int32 est surdimensionné** : pour K ≤ 64, 22 bits suffisent ; un multiplicateur de
-  requantification sur 14 bits donne déjà le résultat exact.
+What these figures teach:
+- **No variant wins everywhere.** Depending on the shape of the GEMM, one is up to 3.4 times faster than the other
+  (decision map in `test/controller/benchmark.py`).
+- **WS reuses the data better**: each weight is read only once, and it needs half the memory bandwidth.
+- **Without DMA, the host is expensive**: on a small layer, loading and reading back take more than half of the total
+  time.
+- **The int32 accumulator is oversized**: for K ≤ 64, 22 bits are enough; a 14-bit requantization multiplier already
+  gives the exact result.
 
-## Organisation du dépôt
+## Repository layout
 
 ```
-README.md                    ce fichier
-CLAUDE.md                    guide de reprise pour les agents IA
-LICENSE                      licence Apache 2.0
+README.md                    this file
+CLAUDE.md                    onboarding guide for AI agents
+LICENSE                      Apache 2.0 license
 src/
-  architecture.md            décisions d'architecture, conventions d'interface, état, résultats, journal
-  <bloc>/interface.md        spécification d'un bloc : ports, comportement, latences, implémentation
-  <bloc>/<bloc>.py           implémentation py4hw (comportementale)
+  architecture.md            architecture decisions, interface conventions, status, results, log
+  <block>/interface.md       specification of a block: ports, behaviour, latencies, implementation
+  <block>/<block>.py         py4hw implementation (behavioural)
 test/
-  README.md                  organisation et conventions des tests
-  common.py                  banc de test py4hw et utilitaires
-  viz.py                     style des figures, rendu rapide des animations
-  layout.py                  disposition des données en mémoire, côté hôte
-  <bloc>/test.py             tests fonctionnels
-  <bloc>/benchmark.py        mesures des limites et des compromis
-  <bloc>/animation.py        visualisation du bloc cycle par cycle
+  README.md                  organisation and conventions of the tests
+  common.py                  py4hw testbench and utilities
+  viz.py                     style of the figures, fast rendering of the animations
+  layout.py                  data layout in memory, on the host side
+  <block>/test.py            functional tests
+  <block>/benchmark.py       measurements of the limits and trade-offs
+  <block>/animation.py       cycle-by-cycle visualisation of the block
 ```
 
-Documents à lire, dans l'ordre :
-1. [`src/architecture.md`](src/architecture.md) : le *pourquoi* (décisions D1 à D12 et leur justification) ;
-2. `src/<bloc>/interface.md` : le *quoi* de chaque bloc ;
-3. [`test/README.md`](test/README.md) : comment tout est vérifié.
+Documents to read, in order:
+1. [`src/architecture.md`](src/architecture.md): the *why* (decisions D1 to D12 and their rationale);
+2. `src/<block>/interface.md`: the *what* of each block;
+3. [`test/README.md`](test/README.md): how everything is verified.
 
 ## Installation
 
-Testé avec Python 3.13.
+Tested with Python 3.13.
 
 ```
 python -m venv .venv
@@ -244,20 +245,20 @@ source .venv/bin/activate
 pip install py4hw numpy matplotlib
 ```
 
-Les benchmarks et les animations ouvrent une fenêtre matplotlib : il faut un backend graphique (par exemple Tk).
-Avec l'option `--save`, ils écrivent un fichier et n'en ont pas besoin.
+The benchmarks and the animations open a matplotlib window: a graphical backend is needed (for example Tk).
+With the `--save` option, they write a file and do not need one.
 
-## Tests, benchmarks et animations
+## Tests, benchmarks and animations
 
-Chaque bloc a trois fichiers dans `test/<bloc>/`, à lancer depuis la racine du dépôt :
+Each block has three files in `test/<block>/`, to be run from the root of the repository:
 
-| Fichier | Rôle | Commande |
+| File | Role | Command |
 |---|---|---|
-| `test.py` | vérifie que le bloc fait exactement ce que dit sa spécification | `python test/<bloc>/test.py` |
-| `benchmark.py` | mesure ses limites et ses compromis (figure à 4 panneaux) | `python test/<bloc>/benchmark.py [--save fig.png]` |
-| `animation.py` | le montre fonctionner, cycle par cycle (≥ 30 images/s) | `python test/<bloc>/animation.py [--save anim.gif]` |
+| `test.py` | checks that the block does exactly what its specification says | `python test/<block>/test.py` |
+| `benchmark.py` | measures its limits and its trade-offs (4-panel figure) | `python test/<block>/benchmark.py [--save fig.png]` |
+| `animation.py` | shows it working, cycle by cycle (≥ 30 frames/s) | `python test/<block>/animation.py [--save anim.gif]` |
 
-Tous les tests :
+All the tests:
 
 ```
 for t in pe pe_array data_feeder output_drain post_processing weight_buffer activation_buffer controller host_interface npu_top; do
@@ -265,50 +266,50 @@ for t in pe pe_array data_feeder output_drain post_processing weight_buffer acti
 done
 ```
 
-Quelques points d'entrée :
+A few entry points:
 
 ```
-python test/npu_top/animation.py              # la puce complète pendant une couche
-python test/npu_top/animation.py --variant WS # la même chose en weight-stationary
-python test/pe_array/animation.py             # les données qui traversent la grille systolique
-python test/controller/benchmark.py           # quelle variante choisir selon la forme du GEMM
-python test/npu_top/benchmark.py              # la puce sur de vraies charges
+python test/npu_top/animation.py              # the complete chip during one layer
+python test/npu_top/animation.py --variant WS # the same thing in weight-stationary
+python test/pe_array/animation.py             # the data crossing the systolic array
+python test/controller/benchmark.py           # which variant to choose according to the shape of the GEMM
+python test/npu_top/benchmark.py              # the chip on real workloads
 ```
 
-## Méthode de travail
+## Working method
 
-- **La spécification d'abord.** Chaque décision est prise, justifiée et datée dans `src/architecture.md` avant
-  d'être implémentée ; chaque bloc a sa spécification avant son code.
-- **Tout est vérifié contre une référence indépendante** : NumPy pour les résultats, des modèles de référence cycle
-  par cycle pour le comportement, et les latences annoncées au cycle près. Pour s'assurer que les tests détectent
-  vraiment les erreurs, on introduit volontairement des défauts dans les blocs et on vérifie qu'ils échouent.
-- **On assemble progressivement.** Le cœur de calcul est d'abord piloté par un modèle Python du séquenceur, puis on
-  ajoute le post-traitement, les mémoires, le vrai `controller`, et enfin le bus : à chaque étape, tout le chemin
-  est revérifié de bout en bout.
-- **On mesure les compromis au lieu de les supposer**, et on les montre : chaque bloc a son benchmark et son
+- **Specification first.** Each decision is made, justified and dated in `src/architecture.md` before being
+  implemented; each block has its specification before its code.
+- **Everything is checked against an independent reference**: NumPy for the results, cycle-by-cycle reference models
+  for the behaviour, and the announced latencies to the exact cycle. To make sure that the tests really detect errors,
+  defects are deliberately introduced into the blocks and we check that the tests fail.
+- **We assemble step by step.** The compute core is first driven by a Python model of the sequencer, then we add the
+  post-processing, the memories, the real `controller`, and finally the bus: at each step, the whole path is checked
+  again end to end.
+- **We measure the trade-offs instead of assuming them**, and we show them: each block has its benchmark and its
   animation.
 
-## Feuille de route
+## Roadmap
 
-| Version | Cible | Priorité | État |
+| Version | Target | Priority | Status |
 |---|---|---|---|
-| v1 | Simulation (py4hw) | Comprendre, mesurer les compromis | ✅ complète |
-| v2 | FPGA | Faire tenir et fonctionner sur du vrai matériel | à venir |
-| v3 | Tiny Tapeout | Surface et broches minimales | à venir |
+| v1 | Simulation (py4hw) | Understand, measure the trade-offs | ✅ complete |
+| v2 | FPGA | Fit and work on real hardware | upcoming |
+| v3 | Tiny Tapeout | Minimal area and pins | upcoming |
 
-Pistes identifiées par les mesures de la v1 :
-- un **DMA** et un double tampon mémoire, pour que le calcul n'attende plus les transferts de l'hôte ;
-- en OS, **recouvrir le calcul et la lecture des accumulateurs** (39 % des cycles d'un GEMM 16³) ;
-- en WS, un **double registre de poids** pour recouvrir le préchargement (16 % des cycles) ;
-- un **accumulateur réduit** (22 bits) et un multiplicateur de requantification plus étroit, pour la v3 ;
-- un bit d'échange des bancs IN / OUT, pour enchaîner les couches sans recopie.
+Leads identified by the v1 measurements:
+- a **DMA** and a double memory buffer, so that the computation no longer waits for the host transfers;
+- in OS, **overlap the computation and the reading of the accumulators** (39 % of the cycles of a 16³ GEMM);
+- in WS, a **double weight register** to overlap the preload (16 % of the cycles);
+- a **reduced accumulator** (22 bits) and a narrower requantization multiplier, for v3;
+- a bit that swaps the IN / OUT banks, to chain layers without a copy.
 
-## Contribuer
+## Contributing
 
-L'architecture en py4hw est développée par un humain avec l'aide d'agents IA ; la transcription en Verilog est
-faite entièrement à la main par un humain. Les agents IA (et les personnes) qui reprennent le travail trouveront
-dans [`CLAUDE.md`](CLAUDE.md) le périmètre, les conventions du code et des tests, et les pièges connus de py4hw.
+The py4hw architecture is developed by a human with the help of AI agents; the transcription into Verilog is done
+entirely by hand by a human. AI agents (and people) who pick up the work will find in [`CLAUDE.md`](CLAUDE.md) the
+scope, the code and test conventions, and the known pitfalls of py4hw.
 
-## Licence
+## License
 
-Apache 2.0 — voir [`LICENSE`](LICENSE).
+Apache 2.0 — see [`LICENSE`](LICENSE).

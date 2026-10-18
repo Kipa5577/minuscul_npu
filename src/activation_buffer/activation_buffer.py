@@ -1,16 +1,16 @@
 """
-activation_buffer — SRAM des activations (spécification : src/activation_buffer/interface.md)
+activation_buffer — Activation SRAM (specification: src/activation_buffer/interface.md)
 
-Deux bancs simple port indépendants de 2^BAW mots de N·DW bits (1024 × 32 bits chacun en v1) :
-  - IN  : X, lu par le data_feeder pendant un GEMM (core_rd_*)
-  - OUT : Y, écrit par le post_processing pendant un GEMM (core_wr_*, un bit d'écriture par octet)
-Comme les bancs sont séparés, le cœur peut lire X et écrire Y dans le même cycle.
+Two independent single-port banks of 2^BAW words of N·DW bits (1024 × 32 bits each in v1):
+  - IN : X, read by the data_feeder during a GEMM (core_rd_*)
+  - OUT: Y, written by the post_processing during a GEMM (core_wr_*, one write bit per byte)
+Since the banks are separate, the core can read X and write Y in the same cycle.
 
-Quand busy = 0, l'hôte accède aux deux bancs (host_*) : le bit BAW de host_addr choisit le banc (0 = IN, 1 = OUT).
-host_rdata vient du banc choisi lors de la lecture (le choix est mémorisé avec la donnée lue).
-Lecture synchrone (latence 1) ; le contenu n'est pas réinitialisé (pas de rst_n).
+When busy = 0, the host accesses both banks (host_*): bit BAW of host_addr selects the bank (0 = IN, 1 = OUT).
+host_rdata comes from the bank selected at read time (the selection is remembered along with the data read).
+Synchronous read (latency 1); the contents are not reset (no rst_n).
 
-Description comportementale : clock() uniquement.
+Behavioural description: clock() only.
 """
 
 from py4hw import Logic, Wire
@@ -45,9 +45,9 @@ class ActivationBuffer(Logic):
         self.depth = 1 << self.BAW
         self.bank_in = [0] * self.depth
         self.bank_out = [0] * self.depth
-        self.in_rdata_r = 0             # registre de lecture du banc IN (partagé hôte / cœur)
-        self.out_rdata_r = 0            # registre de lecture du banc OUT (hôte)
-        self.sel_r = 0                  # banc lu par l'hôte au dernier accès
+        self.in_rdata_r = 0             # read register of the IN bank (shared host / core)
+        self.out_rdata_r = 0            # read register of the OUT bank (host)
+        self.sel_r = 0                  # bank read by the host at the last access
 
     def _masked_write(self, old: int, new: int, mask: int) -> int:
         byte = (1 << self.DW) - 1

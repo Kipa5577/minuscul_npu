@@ -1,12 +1,12 @@
 """
-Animation du pe, cycle par cycle : les deux variantes côte à côte.
+Animation of the pe, cycle by cycle: the two variants side by side.
 
-  OS : le PE accumule 6 produits w·x dans son accumulateur, après un clear.
-  WS : le PE charge un poids (load), puis calcule psum_out = psum_in + w·x sur 6 colonnes.
+  OS: the PE accumulates 6 products w·x in its accumulator, after a clear.
+  WS: the PE loads a weight (load), then computes psum_out = psum_in + w·x over 6 columns.
 
-Chaque image montre les entrées présentées pendant le cycle t et l'état des registres juste après le front.
+Each frame shows the inputs presented during cycle t and the state of the registers just after the edge.
 
-Lancement : python test/pe/animation.py [--save fichier.gif] [--interval ms]
+Run: python test/pe/animation.py [--save file.gif] [--interval ms]
 """
 
 import sys
@@ -32,10 +32,10 @@ P_SEQ = [10, 20, 30, 40, 50, 60]
 W_WS = 3
 
 
-# --- Scénarios : on enregistre une trace (entrées du cycle, sorties après le front) ---
+# --- Scenarios: a trace is recorded (inputs of the cycle, outputs after the edge) ---
 
 def trace_os():
-    b = pe_test.bench_os()          # contient déjà un cycle de reset
+    b = pe_test.bench_os()          # already contains one reset cycle
     steps = [dict(rst_n=1, w_in=0, x_in=0, clear=1)]
     steps += [dict(rst_n=1, w_in=w, x_in=x, clear=0) for w, x in zip(W_SEQ, X_SEQ)]
     steps += [dict(rst_n=1, w_in=0, x_in=0, clear=0)] * 2
@@ -60,7 +60,7 @@ def trace_ws():
     return frames
 
 
-# --- Dessin -----------------------------------------------------------------------
+# --- Drawing ----------------------------------------------------------------------
 
 ACTIVE = '#d62728'
 IDLE = '#888888'
@@ -74,10 +74,10 @@ def draw_pe(ax, title):
     ax.set_title(title, fontsize=12, fontweight='bold')
     ax.add_patch(FancyBboxPatch((3, 3), 4, 4, boxstyle='round,pad=0.1', fc=BOX, ec='#335'))
     arrow = dict(arrowstyle='->', lw=1.8, color='#335')
-    ax.annotate('', xy=(3, 5), xytext=(0.6, 5), arrowprops=arrow)      # ouest → PE
-    ax.annotate('', xy=(5, 7), xytext=(5, 9.4), arrowprops=arrow)      # nord → PE
-    ax.annotate('', xy=(9.4, 5), xytext=(7, 5), arrowprops=arrow)      # PE → est
-    ax.annotate('', xy=(5, 0.6), xytext=(5, 3), arrowprops=arrow)      # PE → sud
+    ax.annotate('', xy=(3, 5), xytext=(0.6, 5), arrowprops=arrow)      # west → PE
+    ax.annotate('', xy=(5, 7), xytext=(5, 9.4), arrowprops=arrow)      # north → PE
+    ax.annotate('', xy=(9.4, 5), xytext=(7, 5), arrowprops=arrow)      # PE → east
+    ax.annotate('', xy=(5, 0.6), xytext=(5, 3), arrowprops=arrow)      # PE → south
     t = {}
     t['west'] = ax.text(0.5, 5.4, '', fontsize=10)
     t['north'] = ax.text(5.2, 9.0, '', fontsize=10)
@@ -122,8 +122,8 @@ def update_ws(t, f):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--save', help='enregistre l\'animation (gif) au lieu de l\'afficher')
-    ap.add_argument('--interval', type=int, default=1200, help='durée d\'une image en ms')
+    ap.add_argument('--save', help='saves the animation (gif) instead of showing it')
+    ap.add_argument('--interval', type=int, default=1200, help='duration of one frame in ms')
     args = ap.parse_args()
 
     fos, fws = trace_os(), trace_ws()
@@ -154,14 +154,14 @@ def main():
         update_ws(t_ws, fws[k])
         line_os.set_data(range(k + 1), acc[:k + 1])
         line_ws.set_data(range(k + 1), psum[:k + 1])
-        title.set_text(f'Cycle {k} : entrées présentées pendant le cycle → registres après le front')
+        title.set_text(f'Cycle {k}: inputs presented during the cycle → registers after the edge')
         return []
 
     anim = FuncAnimation(fig, frame, frames=n, interval=args.interval, repeat=True)
     fig.tight_layout()
     if args.save:
         anim.save(args.save, writer=PillowWriter(fps=1000 / args.interval))
-        print(f'animation enregistrée : {args.save}')
+        print(f'animation saved: {args.save}')
     else:
         plt.show()
 

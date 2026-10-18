@@ -1,62 +1,63 @@
-# activation_buffer — SRAM des activations
+# activation_buffer — Activation SRAM
 
-Le bloc contient deux bancs **simple port** indépendants de 1024 × 32 bits chacun :
-- **IN** : X, lu par le cœur ;
-- **OUT** : Y, écrit par `post_processing`.
+This block contains two independent **single-port** banks of 1024 × 32 bits each:
+- **IN**: X, read by the core;
+- **OUT**: Y, written by `post_processing`.
 
-Comme les bancs sont séparés, le cœur peut lire X et écrire Y dans le même cycle.
-La disposition des données est décrite en D6, et dépend de la variante.
+Since the banks are separate, the core can read X and write Y in the same cycle.
+The data layout is described in D6, and depends on the variant.
 
-## Paramètres
+## Parameters
 `N` = 4, `DW` = 8, `BAW` = 10
 
 ## Ports
-| Signal | Dir | Largeur | Description |
+| Signal | Dir | Width | Description |
 |---|---|---|---|
-| `clk` | in | 1 | (le contenu n'est pas réinitialisé par `rst_n`) |
-| `busy` | in | 1 | 0 : port hôte actif sur les deux bancs · 1 : ports cœur actifs |
-| `host_addr` | in | BAW+1 | bit BAW : 0 = IN, 1 = OUT ; bits [BAW−1:0] : adresse de mot |
+| `clk` | in | 1 | (the contents are not reset by `rst_n`) |
+| `busy` | in | 1 | 0: host port active on both banks · 1: core ports active |
+| `host_addr` | in | BAW+1 | bit BAW: 0 = IN, 1 = OUT; bits [BAW−1:0]: word address |
 | `host_wdata` | in | N·DW | |
-| `host_we` | in | 1 | écriture d'un mot complet |
+| `host_we` | in | 1 | write of a full word |
 | `host_re` | in | 1 | |
-| `host_rdata` | out | N·DW | latence 1 |
-| `core_rd_addr` | in | BAW | banc IN, depuis le `controller` |
+| `host_rdata` | out | N·DW | latency 1 |
+| `core_rd_addr` | in | BAW | IN bank, from the `controller` |
 | `core_rd_re` | in | 1 | |
-| `core_rd_rdata` | out | N·DW | latence 1, vers le `data_feeder` |
-| `core_wr_addr` | in | BAW | banc OUT, depuis `post_processing` (`y_addr`) |
+| `core_rd_rdata` | out | N·DW | latency 1, to the `data_feeder` |
+| `core_wr_addr` | in | BAW | OUT bank, from `post_processing` (`y_addr`) |
 | `core_wr_wdata` | in | N·DW | `y_wdata` |
 | `core_wr_we` | in | 1 | `y_we` |
-| `core_wr_wmask` | in | N | `y_wmask` : un bit d'autorisation d'écriture par octet (voie) |
+| `core_wr_wmask` | in | N | `y_wmask`: one write-enable bit per byte (lane) |
 
-## Comportement
+## Behaviour
 ```
-banc IN  : busy ? lecture cœur : accès hôte (si host_addr[BAW] = 0)
-banc OUT : busy ? écriture cœur (octets autorisés par wmask) : accès hôte (si host_addr[BAW] = 1)
-host_rdata : mot du banc choisi par host_addr[BAW] (le choix est mémorisé un cycle)
+IN bank    : busy ? core read : host access (if host_addr[BAW] = 0)
+OUT bank   : busy ? core write (bytes enabled by wmask) : host access (if host_addr[BAW] = 1)
+host_rdata : word of the bank selected by host_addr[BAW] (the selection is remembered for one cycle)
 ```
 
-## Latences
-Lecture : L = 1. Écriture : effective au front qui suit.
+## Latencies
+Read: L = 1. Write: takes effect at the next edge.
 
 ---
 
-## Implémentation
+## Implementation
 
-- Fichier : [`activation_buffer.py`](activation_buffer.py) — classe `ActivationBuffer`, `clock()` uniquement (pas de `rst_n`).
-- Chaque banc a son registre de lecture ; `host_rdata` présente celui du banc lu en dernier par l'hôte
-  (le choix est mémorisé avec la donnée). `core_rd_rdata` est le registre de lecture du banc IN.
-- L'écriture du cœur dans le banc OUT ne modifie que les octets autorisés par `core_wr_wmask`.
+- File: [`activation_buffer.py`](activation_buffer.py) — class `ActivationBuffer`, `clock()` only (no `rst_n`).
+- Each bank has its own read register; `host_rdata` presents the one of the bank last read by the host (the selection
+  is remembered along with the data). `core_rd_rdata` is the read register of the IN bank.
+- A core write into the OUT bank only modifies the bytes enabled by `core_wr_wmask`.
 
-| Constructeur | Ports, dans l'ordre |
+| Constructor | Ports, in order |
 |---|---|
 | `ActivationBuffer(parent, name, …)` | `busy, host_addr, host_wdata, host_we, host_re, host_rdata, core_rd_addr, core_rd_re, core_rd_rdata, core_wr_addr, core_wr_wdata, core_wr_we, core_wr_wmask` |
 
-**Vérification** ([`test/activation_buffer/`](../../test/activation_buffer/)) : accès hôte aux deux bancs, lecture IN
-et écriture OUT dans le même cycle, masque par octet, côté actif choisi par `busy`, modèle de référence sur 3000 accès,
-X rangé selon D6 puis relu aux adresses du planificateur. **De bout en bout avec les mémoires** : l'hôte charge W, X et
-les biais mot par mot, le cœur calcule, l'hôte relit Y dans le banc OUT ; et **deux couches enchaînées** en recopiant
-Y tel quel du banc OUT vers le banc IN, ce qui vérifie que Y sort bien au format X de la variante (D6).
+**Verification** ([`test/activation_buffer/`](../../test/activation_buffer/)): host access to both banks, IN read and
+OUT write in the same cycle, per-byte mask, active side selected by `busy`, reference model over 3000 accesses, X
+stored according to D6 then read back at the scheduler addresses. **End to end with the memories**: the host loads W,
+X and the biases word by word, the core computes, the host reads Y back from the OUT bank; and **two chained layers**
+by copying Y as is from the OUT bank to the IN bank, which checks that Y does come out in the X format of the variant
+(D6).
 
-**Mesuré** : sans DMA, l'hôte transfère un mot par cycle et le cœur attend : chargement et relecture représentent la
-moitié du temps total pour un GEMM 4³, et encore 14 % pour un GEMM 64³. Entre deux couches, la recopie OUT → IN par
-l'hôte coûte 3 cycles par mot de Y (578 cycles pour la couche 64 → 48 d'un MLP sur un lot de 16).
+**Measured**: without DMA, the host transfers one word per cycle and the core waits: loading and reading back account
+for half of the total time for a 4³ GEMM, and still 14 % for a 64³ GEMM. Between two layers, the OUT → IN copy by the
+host costs 3 cycles per word of Y (578 cycles for the 64 → 48 layer of an MLP on a batch of 16).

@@ -1,14 +1,14 @@
 """
-Test fonctionnel de l'output_drain (spécification : src/output_drain/interface.md).
+Functional test of the output_drain (specification: src/output_drain/interface.md).
 
-  - OS : une ligne d'accumulateurs par cycle, latence 1, tag transmis
-  - WS : redressement de l'escalier, retard de 2N cycles du sideband, accumulation sur les tuiles de K
-  - comparaison cycle par cycle avec des modèles de référence
-  - de bout en bout : data_feeder → pe_array → output_drain sur des GEMM multi-tuiles, pilotés par un
-    planificateur Python qui émet cycle par cycle ce que la FSM du controller doit émettre
-    (src/controller/interface.md). Y est reconstruit uniquement à partir des (tag, res) sortis.
+  - OS: one row of accumulators per cycle, latency 1, tag passed on
+  - WS: deskewing of the staircase, 2N-cycle delay of the sideband, accumulation over the K tiles
+  - cycle-by-cycle comparison with reference models
+  - end to end: data_feeder → pe_array → output_drain on multi-tile GEMMs, driven by a
+    Python scheduler that emits cycle by cycle what the controller FSM must emit
+    (src/controller/interface.md). Y is rebuilt only from the (tag, res) pairs that come out.
 
-Lancement : python test/output_drain/test.py
+Run: python test/output_drain/test.py
 """
 
 import sys
@@ -26,7 +26,7 @@ from src.output_drain.output_drain import OutputDrain_OS, OutputDrain_WS
 DW, AW = 8, 32
 DIM_MAX = 64
 IW = 6                       # log2(DIM_MAX)
-TAG_W = 20                   # {y_addr[19:10], lane_mask[9:6], row[5:0]} pour N = 4
+TAG_W = 20                   # {y_addr[19:10], lane_mask[9:6], row[5:0]} for N = 4
 
 
 # --- Tag (architecture.md §5.4) -------------------------------------------------------------------
@@ -39,7 +39,7 @@ def tag_unpack(tag, N=4):
     return tag >> (N + IW), (tag >> IW) & ((1 << N) - 1), tag & ((1 << IW) - 1)
 
 
-# --- Bancs unitaires ---------------------------------------------------------------------------------
+# --- Unit benches ------------------------------------------------------------------------------------
 
 def bench_os(N=4):
     lw = max(1, (N - 1).bit_length())
@@ -72,7 +72,7 @@ def res_lanes(b):
     return unpack(b.w['res'].get(), b.N, AW)
 
 
-# --- Modèles de référence ----------------------------------------------------------------------------
+# --- Reference models --------------------------------------------------------------------------------
 
 class RefDrainOS:
     def __init__(self, N):
@@ -113,7 +113,7 @@ def wrap32(v):
     return v - (1 << 32) if v >> 31 else v
 
 
-# --- Tests OS --------------------------------------------------------------------------------------------
+# --- OS tests --------------------------------------------------------------------------------------------
 
 def test_os_reset():
     b = bench_os()
@@ -123,19 +123,19 @@ def test_os_reset():
     assert (b.get('res'), b.get('res_valid'), b.get('tag_out')) == (0, 0, 0)
 
 
-def test_os_vidage_ligne_par_ligne():
+def test_os_drain_row_by_row():
     N = 4
     A = np.arange(-8, 8).reshape(N, N) * 1000
     b = bench_os(N)
     b.set(acc=pack(A.flatten(), AW))
     for r in range(N):
-        b.step(drain_en=1, drain_row=r, tag_in=100 + r)              # latence 1 : visible après le front
+        b.step(drain_en=1, drain_row=r, tag_in=100 + r)              # latency 1: visible after the edge
         assert b.get('res_valid') == 1 and res_lanes(b) == list(A[r]) and b.get('tag_out') == 100 + r
     b.step(drain_en=0)
     assert b.get('res_valid') == 0
 
 
-def test_os_aleatoire_cycle_par_cycle():
+def test_os_random_cycle_by_cycle():
     random.seed(50)
     for N in (2, 3, 4, 8):
         b, ref = bench_os(N), RefDrainOS(N)
@@ -147,31 +147,31 @@ def test_os_aleatoire_cycle_par_cycle():
             assert (res_lanes(b), b.get('res_valid'), b.get('tag_out')) == (ref.res, ref.valid, ref.tag), N
 
 
-# --- Tests WS --------------------------------------------------------------------------------------------
+# --- WS tests --------------------------------------------------------------------------------------------
 
-def test_ws_redressement_et_latence():
-    """Escalier en entrée (voie i en retard de i cycles) → voies alignées, res_valid à e + 2N + 1."""
+def test_ws_deskew_and_latency():
+    """Staircase at the input (lane i late by i cycles) → aligned lanes, res_valid at e + 2N + 1."""
     for N in (1, 2, 4, 8):
         b = bench_ws(N)
         vals = [(i + 1) * 111 for i in range(N)]
-        e = 0                                       # cycle d'émission de la colonne
+        e = 0                                       # emission cycle of the column
         hist = []
         for c in range(4 * N + 4):
-            # la voie i porte la somme partielle pendant le cycle e + 1 + i + N (contrat du pe_array)
+            # lane i carries the partial sum during cycle e + 1 + i + N (pe_array contract)
             south = [vals[i] if c == e + 1 + i + N else 0 for i in range(N)]
             sb = dict(s_valid=1, s_j=5, s_first=1, s_last=1, tag_in=777) if c == e else \
                 dict(s_valid=0, s_j=0, s_first=0, s_last=0, tag_in=0)
             b.step(psum_south=pack(south, AW), **sb)
             hist.append((b.get('res_valid'), res_lanes(b), b.get('tag_out')))
         valid = [c for c, h in enumerate(hist) if h[0]]
-        assert valid == [e + 2 * N], f'N={N} : res_valid après les pas {valid}'   # visible pendant e + 2N + 1
+        assert valid == [e + 2 * N], f'N={N}: res_valid after steps {valid}'   # visible during e + 2N + 1
         assert hist[e + 2 * N][1] == vals and hist[e + 2 * N][2] == 777, N
 
 
-def test_ws_accumulation_sur_tuiles_de_k():
+def test_ws_accumulation_over_k_tiles():
     N = 4
     b = bench_ws(N)
-    # trois passages sur la même colonne j = 7 : first, milieu, last
+    # three passes over the same column j = 7: first, middle, last
     parts = [[1, 2, 3, 4], [10, 20, 30, 40], [-100, 200, -300, 400]]
     out = []
     for t, part in enumerate(parts):
@@ -186,11 +186,11 @@ def test_ws_accumulation_sur_tuiles_de_k():
     assert out == [list(np.sum(parts, axis=0))]
 
 
-def test_ws_first_et_last_ensemble():
-    """K ≤ N : une seule tuile de K, le résultat sort directement sans passer par la mémoire."""
+def test_ws_first_and_last_together():
+    """K ≤ N: a single K tile, the result comes out directly without going through the memory."""
     N = 4
     b = bench_ws(N)
-    b.dut.accmem[3] = [999] * N                     # contenu ancien : doit être ignoré
+    b.dut.accmem[3] = [999] * N                     # old contents: must be ignored
     for c in range(3 * N):
         south = [5 * (i + 1) if c == 1 + i + N else 0 for i in range(N)]
         sb = dict(s_valid=1, s_j=3, s_first=1, s_last=1, tag_in=1) if c == 0 else {}
@@ -198,10 +198,10 @@ def test_ws_first_et_last_ensemble():
         if b.get('res_valid'):
             assert res_lanes(b) == [5, 10, 15, 20]
             return
-    raise AssertionError('aucun résultat')
+    raise AssertionError('no result')
 
 
-def test_ws_aleatoire_cycle_par_cycle():
+def test_ws_random_cycle_by_cycle():
     random.seed(51)
     for N in (2, 4):
         b, ref = bench_ws(N), RefDrainWS(N)
@@ -214,7 +214,7 @@ def test_ws_aleatoire_cycle_par_cycle():
             assert (res_lanes(b), b.get('res_valid'), b.get('tag_out')) == (ref.res, ref.valid, ref.tag), N
 
 
-# --- Planificateur : ce que la FSM du controller émet, cycle par cycle -----------------------------------
+# --- Scheduler: what the controller FSM emits, cycle by cycle --------------------------------------------
 
 def tiles(D, N):
     return -(-D // N)
@@ -225,18 +225,18 @@ def lane_mask(t, D, N):
 
 
 IDLE = dict(w=None, x=None, w_addr=None, x_addr=None, w_mask=0, x_mask=0, ctl=0, drain_en=0, drain_row=0,
-            s_valid=0, s_j=0, s_first=0, s_last=0, tag=0, phase='repos')
+            s_valid=0, s_j=0, s_first=0, s_last=0, tag=0, phase='idle')
 
 
 def dirty(rng, shape, valid_block):
-    """Matrice mémoire : le bloc valide, entouré de valeurs non nulles (mémoire « sale »)."""
+    """Memory matrix: the valid block, surrounded by non-zero values ("dirty" memory)."""
     m = rng.integers(-128, 128, shape)
     m[:valid_block.shape[0], :valid_block.shape[1]] = valid_block
     return m
 
 
 def plan_os(W, X, N, rng):
-    """Boucles i_t → j_t → k : CLEAR, STREAM (K), FLUSH (2N − 1), DRAIN (N), puis TAIL (4)."""
+    """Loops i_t → j_t → k: CLEAR, STREAM (K), FLUSH (2N − 1), DRAIN (N), then TAIL (4)."""
     M, K = W.shape
     Nd = X.shape[1]
     Wd = dirty(rng, (N * tiles(M, N), K), W)
@@ -248,18 +248,18 @@ def plan_os(W, X, N, rng):
             for k in range(K):
                 em.append(IDLE | dict(w=list(Wd[N * it:N * it + N, k]), x=list(Xd[k, N * jt:N * jt + N]),
                                       w_addr=(it << IW) | k, x_addr=(jt << IW) | k,
-                                      w_mask=lane_mask(it, M, N), x_mask=lane_mask(jt, Nd, N), phase='flux'))
-            em += [IDLE | dict(phase='vidange')] * (2 * N - 1)
+                                      w_mask=lane_mask(it, M, N), x_mask=lane_mask(jt, Nd, N), phase='stream'))
+            em += [IDLE | dict(phase='flush')] * (2 * N - 1)
             for r in range(N):
                 i = N * it + r
-                em.append(IDLE | dict(drain_en=1, drain_row=r, phase='lecture',
+                em.append(IDLE | dict(drain_en=1, drain_row=r, phase='drain',
                                       tag=tag_pack((jt << IW) | i, lane_mask(jt, Nd, N) if i < M else 0, i, N)))
-    em += [IDLE | dict(phase='fin')] * 4
+    em += [IDLE | dict(phase='tail')] * 4
     return em
 
 
 def plan_ws(W, X, N, rng):
-    """Boucles i_t → k_t → j : PRELOAD (N), STREAM (N_dim), FLUSH (2N − 3), puis TAIL (2N + 4)."""
+    """Loops i_t → k_t → j: PRELOAD (N), STREAM (N_dim), FLUSH (2N − 3), then TAIL (2N + 4)."""
     M, K = W.shape
     Nd = X.shape[1]
     Wd = dirty(rng, (N * tiles(M, N), N * tiles(K, N)), W)
@@ -269,30 +269,30 @@ def plan_ws(W, X, N, rng):
         for kt in range(tiles(K, N)):
             for n in range(N):
                 k = N * kt + N - 1 - n
-                em.append(IDLE | dict(w=list(Wd[N * it:N * it + N, k]), w_addr=(it << IW) | k, ctl=1, phase='préchargement',
+                em.append(IDLE | dict(w=list(Wd[N * it:N * it + N, k]), w_addr=(it << IW) | k, ctl=1, phase='preload',
                                       w_mask=lane_mask(it, M, N) if k < K else 0))
             for j in range(Nd):
                 em.append(IDLE | dict(x=list(Xd[N * kt:N * kt + N, j]), x_addr=(kt << IW) | j,
-                                      x_mask=lane_mask(kt, K, N), phase='flux',
+                                      x_mask=lane_mask(kt, K, N), phase='stream',
                                       s_valid=1, s_j=j, s_first=int(kt == 0), s_last=int(kt == tiles(K, N) - 1),
                                       tag=tag_pack((it << IW) | j, lane_mask(it, M, N), N * it, N)))
-            em += [IDLE | dict(phase='vidange')] * (2 * N - 3)
-    em += [IDLE | dict(phase='fin')] * (2 * N + 4)
+            em += [IDLE | dict(phase='flush')] * (2 * N - 3)
+    em += [IDLE | dict(phase='tail')] * (2 * N + 4)
     return em
 
 
-# --- Cœur de calcul : data_feeder → pe_array → output_drain ------------------------------------------------
+# --- Compute core: data_feeder → pe_array → output_drain ---------------------------------------------------
 
 def core(variant, N=4, post=False, mem=False, ctrl=False):
     """
-    Assemblage incrémental du NPU autour du cœur de calcul (data_feeder → pe_array → output_drain) :
-      - post=True : le post_processing est branché à la suite ; sa configuration et le port hôte des biais
-        deviennent des entrées du banc, ses sorties y_* des sorties ;
-      - mem=True (implique post) : le weight_buffer et l'activation_buffer sont branchés ; le banc émet des adresses
-        (w_addr/w_re, x_addr/x_re) au lieu de fournir les mots, et les ports hôte des buffers sont exposés ;
-      - ctrl=True (implique mem) : le controller pilote tout ; le banc ne fournit plus que go et les dimensions,
-        et busy, done, cycles deviennent des sorties. Il ne manque alors que host_interface.
-    Les signaux qui ne sont ni des entrées ni des sorties du banc sont des fils internes.
+    Incremental assembly of the NPU around the compute core (data_feeder → pe_array → output_drain):
+      - post=True: the post_processing is plugged in after it; its configuration and the host port of the biases
+        become inputs of the bench, its y_* outputs become outputs;
+      - mem=True (implies post): the weight_buffer and the activation_buffer are plugged in; the bench emits addresses
+        (w_addr/w_re, x_addr/x_re) instead of supplying the words, and the host ports of the buffers are exposed;
+      - ctrl=True (implies mem): the controller drives everything; the bench only supplies go and the dimensions,
+        and busy, done, cycles become outputs. Only host_interface is then missing.
+    The signals that are neither inputs nor outputs of the bench are internal wires.
     """
     mem = mem or ctrl
     post = post or mem
@@ -306,9 +306,9 @@ def core(variant, N=4, post=False, mem=False, ctrl=False):
                  wb_host_addr=BAW, wb_host_wdata=N * DW, wb_host_we=1, wb_host_re=1, wb_host_rdata=N * DW,
                  ab_host_addr=BAW + 1, ab_host_wdata=N * DW, ab_host_we=1, ab_host_re=1, ab_host_rdata=N * DW,
                  go=1, dim_m=IW + 1, dim_k=IW + 1, dim_n=IW + 1, done=1, cycles=32)
-    commandes = ['w_mask', 'x_mask', 'ctl_in', 'tag_in'] + \
+    commands = ['w_mask', 'x_mask', 'ctl_in', 'tag_in'] + \
         (['drain_en', 'drain_row'] if variant == 'OS' else ['s_valid', 's_j', 's_first', 's_last'])
-    ins = ['rst_n'] + ([] if ctrl else commandes)
+    ins = ['rst_n'] + ([] if ctrl else commands)
     ins += (['w_addr', 'w_re', 'x_addr', 'x_re'] if mem and not ctrl else []) + ([] if mem else ['w_rdata', 'x_rdata'])
     outs = ['res', 'res_valid', 'tag_out']
     if post:
@@ -325,7 +325,7 @@ def core(variant, N=4, post=False, mem=False, ctrl=False):
 
     def build(s, w):
         w = dict(w)
-        for name, wd in width.items():                     # fils internes
+        for name, wd in width.items():                     # internal wires
             if name not in w:
                 w[name] = s.wire(name, wd)
         wa, xa, ca = s.wire('w_arr', N * DW), s.wire('x_arr', N * DW), s.wire('ctl_arr')
@@ -368,7 +368,7 @@ def core(variant, N=4, post=False, mem=False, ctrl=False):
                 parts['ctrl'] = Controller_OS(s, 'ctrl', *common, w['drain_en'], w['drain_row'])
             else:
                 parts['ctrl'] = Controller_WS(s, 'ctrl', *common, w['s_valid'], w['s_j'], w['s_first'], w['s_last'])
-        parts['w'] = w                                     # tous les fils, y compris internes
+        parts['w'] = w                                     # all the wires, internal ones included
         return parts
 
     b = Bench(inputs={n: width[n] for n in ins}, outputs={n: width[n] for n in outs}, build=build)
@@ -380,9 +380,9 @@ def core(variant, N=4, post=False, mem=False, ctrl=False):
 
 def run_core(b, em, on_cycle=None):
     """
-    Joue le plan : au cycle c, le controller émet em[c] et la SRAM rend les mots de em[c − 1].
-    Sans mémoires, le banc fournit lui-même ces mots ; avec mem=True, il émet les adresses et les buffers répondent.
-    Renvoie la liste des (cycle, tag, res) sortis par l'output_drain.
+    Plays the plan: at cycle c, the controller emits em[c] and the SRAM returns the words of em[c − 1].
+    Without memories, the bench supplies these words itself; with mem=True, it emits the addresses and the buffers
+    respond. Returns the list of (cycle, tag, res) output by the output_drain.
     """
     N = b.N
     zero = [0] * N
@@ -411,7 +411,7 @@ def run_core(b, em, on_cycle=None):
 
 
 def rebuild_y(variant, out, M, Nd, N=4):
-    """Reconstruit Y à partir des seuls (tag, res) : chaque élément doit être écrit exactement une fois."""
+    """Rebuilds Y from the (tag, res) pairs alone: each element must be written exactly once."""
     Y = np.zeros((M, Nd), dtype=np.int64)
     count = np.zeros((M, Nd), dtype=int)
     for _, tag, res in out:
@@ -425,7 +425,7 @@ def rebuild_y(variant, out, M, Nd, N=4):
     return Y, count
 
 
-def gemm_bout_en_bout(variant, M, K, Nd, seed):
+def gemm_end_to_end(variant, M, K, Nd, seed):
     rng = np.random.default_rng(seed)
     W = rng.integers(-128, 128, (M, K))
     X = rng.integers(-128, 128, (K, Nd))
@@ -438,21 +438,21 @@ def gemm_bout_en_bout(variant, M, K, Nd, seed):
 DIMS = [(4, 4, 4), (3, 5, 2), (1, 1, 1), (8, 8, 8), (10, 7, 9), (5, 13, 6)]
 
 
-def test_bout_en_bout_os():
+def test_end_to_end_os():
     for s, (M, K, Nd) in enumerate(DIMS):
-        ref, Y, count, _, _ = gemm_bout_en_bout('OS', M, K, Nd, 60 + s)
-        assert (count == 1).all(), f'OS {M}×{K}×{Nd} : éléments écrits {count.tolist()}'
-        assert (Y == ref).all(), f'OS {M}×{K}×{Nd} : Y faux'
+        ref, Y, count, _, _ = gemm_end_to_end('OS', M, K, Nd, 60 + s)
+        assert (count == 1).all(), f'OS {M}×{K}×{Nd}: elements written {count.tolist()}'
+        assert (Y == ref).all(), f'OS {M}×{K}×{Nd}: wrong Y'
 
 
-def test_bout_en_bout_ws():
+def test_end_to_end_ws():
     for s, (M, K, Nd) in enumerate(DIMS):
-        ref, Y, count, _, _ = gemm_bout_en_bout('WS', M, K, Nd, 70 + s)
-        assert (count == 1).all(), f'WS {M}×{K}×{Nd} : éléments écrits {count.tolist()}'
-        assert (Y == ref).all(), f'WS {M}×{K}×{Nd} : Y faux'
+        ref, Y, count, _, _ = gemm_end_to_end('WS', M, K, Nd, 70 + s)
+        assert (count == 1).all(), f'WS {M}×{K}×{Nd}: elements written {count.tolist()}'
+        assert (Y == ref).all(), f'WS {M}×{K}×{Nd}: wrong Y'
 
 
-def test_bout_en_bout_valeurs_extremes():
+def test_end_to_end_extreme_values():
     for variant in ('OS', 'WS'):
         W = np.full((4, 16), -128)
         X = np.full((16, 4), -128)

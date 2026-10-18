@@ -1,9 +1,9 @@
-# dma — Réservé à la v2 (FPGA)
+# dma — Reserved for v2 (FPGA)
 
-Ce bloc n'existe pas en v1 (D8) : l'hôte écrit directement dans les buffers.
+This block does not exist in v1 (D8): the host writes directly into the buffers.
 
-À spécifier en v2 :
-- interface maître vers la mémoire externe (Wishbone ou AXI) ;
-- registres d'adresses source et destination ;
-- handshake valid/ready aux frontières (D12), car la latence de la mémoire externe est variable ;
-- éventuellement le double buffering (D6), pour recouvrir les transferts par le calcul.
+To be specified in v2:
+- master interface to the external memory (Wishbone or AXI);
+- source and destination address registers;
+- valid/ready handshake at the boundaries (D12), because the latency of the external memory is variable;
+- possibly double buffering (D6), to overlap the transfers with the computation.

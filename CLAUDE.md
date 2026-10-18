@@ -1,64 +1,63 @@
-# Guide de reprise pour les agents IA
+# Onboarding guide for AI agents
 
-Ce fichier est destiné aux agents IA qui travaillent sur ce dépôt. Lis-le en entier avant de modifier quoi que ce
-soit, puis lis [`src/architecture.md`](src/architecture.md) et [`test/README.md`](test/README.md).
+This file is intended for the AI agents working on this repository. Read it in full before modifying anything, then
+read [`src/architecture.md`](src/architecture.md) and [`test/README.md`](test/README.md).
 
-## 1. Le projet et ton périmètre
+## 1. The project and your scope
 
-`minuscul_npu` est un petit NPU (accélérateur de réseaux de neurones) conçu pour **apprendre** : comprendre une
-architecture fonctionnelle et **explorer ses compromis**. Il calcule `Y = requant(ReLU(W·X + b))` en int8 sur une
-grille systolique 4×4, en deux variantes comparées : output-stationary (OS) et weight-stationary (WS).
+`minuscul_npu` is a small NPU (neural network accelerator) designed for **learning**: understanding a working
+architecture and **exploring its trade-offs**. It computes `Y = requant(ReLU(W·X + b))` in int8 on a 4×4 systolic
+array, in two compared variants: output-stationary (OS) and weight-stationary (WS).
 
-| Partie | Qui |
+| Part | Who |
 |---|---|
-| Architecture en py4hw (blocs, bancs de test, benchmarks, animations, documentation) | **les agents IA** |
-| Décisions d'architecture | **l'utilisateur** (l'IA analyse, propose, puis consigne la décision) |
-| Transcription en Verilog, FPGA, Tiny Tapeout | **un humain, entièrement à la main** |
+| Architecture in py4hw (blocks, testbenches, benchmarks, animations, documentation) | **the AI agents** |
+| Architecture decisions | **the user** (the AI analyses, proposes, then records the decision) |
+| Transcription into Verilog, FPGA, Tiny Tapeout | **a human, entirely by hand** |
 
-**Ne travaille pas sur le Verilog** : ne l'écris pas, ne le prépare pas, ne le propose pas comme étape suivante,
-n'ajoute pas de commentaires « équivalent Verilog » dans le code. L'utilisateur peut demander de l'aide sur d'autres
-parties : fais-le seulement s'il le demande.
+**Do not work on the Verilog**: do not write it, do not prepare it, do not propose it as a next step, do not add
+"Verilog equivalent" comments in the code. The user may ask for help on other parts: do so only if they ask.
 
-## 2. État actuel (v1 complète)
+## 2. Current status (v1 complete)
 
-Les 10 blocs de la v1 sont implémentés, testés (96 tests), mesurés et animés ; la puce complète (`npu_top`),
-pilotée uniquement par son bus de 32 bits, calcule des couches justes et exécute un petit réseau de neurones quantifié.
-L'état bloc par bloc, les résultats mesurés et les **pistes non encore explorées** sont dans la section 3b de
-`src/architecture.md` : c'est le point de départ naturel pour la suite (v2 : DMA, double tampon, recouvrement
-calcul / vidage, accumulateur réduit, etc.). Le dossier `dma/` est réservé à la v2. Le dossier `algorithms/`, à la
-racine, est vide : demande à l'utilisateur à quoi il doit servir avant d'y mettre quoi que ce soit.
+The 10 blocks of v1 are implemented, tested (96 tests), measured and animated; the complete chip (`npu_top`), driven
+only through its 32-bit bus, computes correct layers and runs a small quantized neural network.
+The block-by-block status, the measured results and the **leads not yet explored** are in section 3b of
+`src/architecture.md`: it is the natural starting point for what comes next (v2: DMA, double buffering, overlap of
+computation / draining, reduced accumulator, etc.). The `dma/` folder is reserved for v2. The `algorithms/` folder, at
+the root, is empty: ask the user what it is for before putting anything in it.
 
-## 3. Carte du dépôt
+## 3. Repository map
 
 ```
-README.md                    présentation publique du projet
-CLAUDE.md                    ce guide
-src/architecture.md          décisions (D1 à D12), conventions d'interface (§5), état et résultats (§3b), journal (§4)
-src/<bloc>/interface.md      spécification d'un bloc : ports, comportement, latences, puis « Implémentation »
-src/<bloc>/<bloc>.py         implémentation py4hw
-test/README.md               organisation des tests, outils partagés, pilotes
-test/common.py               Bench (banc py4hw), complément à deux, pack/unpack, load_test_module, run_tests
-test/viz.py                  palette, style des figures, moteur de rendu rapide des animations
-test/layout.py               disposition des données en mémoire (D6), côté logiciel hôte
-test/<bloc>/test.py          tests fonctionnels
-test/<bloc>/benchmark.py     limites et compromis (figure matplotlib)
-test/<bloc>/animation.py     visualisation cycle par cycle (≥ 30 images/s)
+README.md                    public presentation of the project
+CLAUDE.md                    this guide
+src/architecture.md          decisions (D1 to D12), interface conventions (§5), status and results (§3b), log (§4)
+src/<block>/interface.md     specification of a block: ports, behaviour, latencies, then "Implementation"
+src/<block>/<block>.py       py4hw implementation
+test/README.md               test organisation, shared tools, drivers
+test/common.py               Bench (py4hw testbench), two's complement, pack/unpack, load_test_module, run_tests
+test/viz.py                  palette, style of the figures, fast rendering engine for the animations
+test/layout.py               data layout in memory (D6), on the host software side
+test/<block>/test.py         functional tests
+test/<block>/benchmark.py    limits and trade-offs (matplotlib figure)
+test/<block>/animation.py    cycle-by-cycle visualisation (≥ 30 frames/s)
 ```
 
-Fonctions de référence réutilisées d'un bloc à l'autre (à charger avec `load_test_module`) :
+Reference functions reused from one block to another (to be loaded with `load_test_module`):
 
-| Où | Quoi |
+| Where | What |
 |---|---|
-| `test/output_drain/test.py` | `plan_os` / `plan_ws` (ce que la FSM du controller émet, cycle par cycle), `core(variant, post, mem, ctrl)` (assemblage incrémental du NPU), `run_core`, `rebuild_y`, `tag_pack` |
-| `test/post_processing/test.py` | `reference` (Y attendu, requantification comprise), `gemm_complet` |
-| `test/activation_buffer/test.py` | pilote hôte du chemin de données : `datapath`, `load_*`, `read_ab`, `run_layer` (avec journal des accès), `run_go` |
-| `test/npu_top/test.py` | classe `Npu` : le logiciel hôte de référence, qui pilote la puce uniquement par son bus |
-| `test/npu_top/animation.py` | `trace_puce` : activité de chaque bloc de la puce, cycle par cycle |
-| `test/weight_buffer/animation.py` | `MemGrid`, `Timeline`, `etats_cumules`, `run_animation` (boucle d'animation commune) |
+| `test/output_drain/test.py` | `plan_os` / `plan_ws` (what the controller FSM emits, cycle by cycle), `core(variant, post, mem, ctrl)` (incremental assembly of the NPU), `run_core`, `rebuild_y`, `tag_pack` |
+| `test/post_processing/test.py` | `reference` (expected Y, requantization included), `gemm_full` |
+| `test/activation_buffer/test.py` | host driver of the datapath: `datapath`, `load_*`, `read_ab`, `run_layer` (with a log of the accesses), `run_go` |
+| `test/npu_top/test.py` | class `Npu`: the reference host software, which drives the chip only through its bus |
+| `test/npu_top/animation.py` | `trace_chip`: activity of each block of the chip, cycle by cycle |
+| `test/weight_buffer/animation.py` | `MemGrid`, `Timeline`, `cumulative_states`, `run_animation` (shared animation loop) |
 
-## 4. Lancer les tests
+## 4. Running the tests
 
-Python 3.13 avec `py4hw`, `numpy` et `matplotlib` (voir le README). Depuis la racine :
+Python 3.13 with `py4hw`, `numpy` and `matplotlib` (see the README). From the root:
 
 ```
 for t in pe pe_array data_feeder output_drain post_processing weight_buffer activation_buffer controller host_interface npu_top; do
@@ -66,74 +65,76 @@ for t in pe pe_array data_feeder output_drain post_processing weight_buffer acti
 done
 ```
 
-Tout doit passer avant et après chaque modification. Les fichiers s'appellent `test.py` : pytest ne les découvre pas
-tout seul, on les lance avec `python`. `test/compute_core/` ne contient que des fichiers d'attente : le cœur de calcul
-est testé dans `test/output_drain/`.
+Everything must pass before and after each modification. The files are called `test.py`: pytest does not discover
+them on its own, they are run with `python`. `test/compute_core/` contains only placeholder files: the compute core is
+tested in `test/output_drain/`.
 
-## 5. Conventions de code (demandées par l'utilisateur)
+## 5. Code conventions (requested by the user)
 
-- **py4hw comportemental** : une classe `Logic` par bloc et par variante (`…_OS`, `…_WS`), avec `clock()` pour les
-  registres (sorties publiées par `wire.prepare()`) et `propagate()` pour la logique combinatoire (`wire.put()`).
-  Les blocs purement structurels (`pe_array`, `npu_top`) se contentent d'instancier et de câbler.
-- **La spécification d'abord** : un bloc suit `src/<bloc>/interface.md` et les conventions de
-  `src/architecture.md` §5 (paramètres, nommage, voie l dans les bits `[W·l + W−1 : W·l]`, latences, cycle
-  d'émission, tag). Si l'implémentation oblige à changer la spécification, mets-la à jour et consigne-le au journal.
-- **Pas d'estimation du coût matériel** dans les benchmarks (bascules, multiplieurs…) : on mesure le comportement
-  (cycles, débit, utilisation, accès mémoire, précision).
-- **Langue** : tout est en français (code commenté, documentation, messages, figures).
-- **Dépôt public** : n'écris jamais d'information sur la machine de l'utilisateur (chemins locaux, système, nom
-  d'utilisateur, contournements présentés comme spécifiques à sa machine). Avant de finir, vérifie :
-  `grep -rniE "/mnt/|wsl|windows|/home/|/tmp/" --include=*.py --include=*.md src test README.md` (ce guide contient le motif lui-même, il est donc exclu).
+- **Behavioural py4hw**: one `Logic` class per block and per variant (`…_OS`, `…_WS`), with `clock()` for the
+  registers (outputs published by `wire.prepare()`) and `propagate()` for the combinational logic (`wire.put()`).
+  Purely structural blocks (`pe_array`, `npu_top`) merely instantiate and wire.
+- **Specification first**: a block follows `src/<block>/interface.md` and the conventions of `src/architecture.md` §5
+  (parameters, naming, lane l in bits `[W·l + W−1 : W·l]`, latencies, emission cycle, tag). If the implementation
+  forces a change to the specification, update it and record it in the log.
+- **No hardware cost estimates** in the benchmarks (flip-flops, multipliers…): we measure the behaviour (cycles,
+  throughput, utilisation, memory accesses, precision).
+- **Language**: everything in the repository is in English (documentation, code and identifiers, comments,
+  messages, figures). The user writes to you in French: answer them in French.
+- **Public repository**: never write any information about the user's machine (local paths, operating system,
+  username, workarounds presented as specific to their machine). Before finishing, check:
+  `grep -rniE "/mnt/|wsl|windows|/home/|/tmp/" --include=*.py --include=*.md src test README.md` (this guide contains
+  the pattern itself, so it is excluded). The "memory windows" of the host bus (D7) are expected matches.
 
-## 6. Bancs de test, benchmarks, animations
+## 6. Testbenches, benchmarks, animations
 
-- `test.py` : chaque résultat est comparé à une référence indépendante (NumPy, modèle de référence cycle par cycle,
-  planificateur). Les latences annoncées sont vérifiées **au cycle près** (ni avant, ni après).
-  Quand des tests passent du premier coup, vérifie qu'ils mordent : introduis temporairement un défaut dans le bloc
-  (en le remplaçant à l'exécution) et contrôle que les tests concernés échouent.
-- `benchmark.py` : une figure matplotlib à 4 panneaux, option `--save fichier.png`, résumé chiffré dans le terminal,
-  style `viz.BENCH_RC`. **Couleurs fixes : OS en bleu (`viz.C_OS`), WS en orange (`viz.C_WS`)** ; n'utilise jamais
-  ces deux couleurs pour autre chose. Regarde la figure produite avant de conclure (étiquettes qui se chevauchent,
-  échelles log avec des zéros, etc.).
-- `animation.py` : **au moins 30 images par seconde, à vitesse constante**. L'utilisateur tient à un style visuel
-  soigné : jetons qui circulent, cases qui s'allument (voir `test/pe_array/animation.py` et `test/npu_top/animation.py`).
-  Recette, toujours la même :
-  1. simuler entièrement avant d'animer (trace par cycle) ;
-  2. dessiner jetons, cases et chiffres avec `viz.Layer`, `viz.TextLayer`, `viz.TokenLayers` (une collection de
-     tracés par couche, chiffres convertis en tracés) — jamais des milliers d'objets `Text` ou `Patch` ;
-  3. blitting : tout artiste animé doit appartenir à un axe (titre animé : `viz.title_axes`) et ne doit pas toucher
-     le bord de l'axe (sinon il laisse une trace) ; le texte statique est recouvert par les couches animées ;
-  4. image choisie d'après l'horloge réelle (`run_animation` dans `test/weight_buffer/animation.py`) ;
-  5. vérifier sans écran en passant par le vrai mécanisme de `FuncAnimation` (`anim._init_draw()`, puis
-     `anim._draw_next_frame(f, True)`), mesurer le temps par image (cible < 15 ms en moyenne) et regarder des images.
-  Option `--save fichier.gif` dans chaque animation.
+- `test.py`: each result is compared with an independent reference (NumPy, cycle-by-cycle reference model,
+  scheduler). The announced latencies are checked **to the exact cycle** (neither before nor after).
+  When tests pass on the first try, check that they bite: temporarily introduce a defect into the block (by replacing
+  it at run time) and check that the relevant tests fail.
+- `benchmark.py`: a 4-panel matplotlib figure, `--save file.png` option, numerical summary in the terminal, style
+  `viz.BENCH_RC`. **Fixed colours: OS in blue (`viz.C_OS`), WS in orange (`viz.C_WS`)**; never use these two colours
+  for anything else. Look at the produced figure before concluding (overlapping labels, log scales with zeros, etc.).
+- `animation.py`: **at least 30 frames per second, at a constant speed**. The user cares about a polished visual
+  style: tokens that move, cells that light up (see `test/pe_array/animation.py` and `test/npu_top/animation.py`).
+  The recipe, always the same:
+  1. simulate entirely before animating (per-cycle trace);
+  2. draw tokens, cells and digits with `viz.Layer`, `viz.TextLayer`, `viz.TokenLayers` (one collection of paths per
+     layer, digits converted into paths) — never thousands of `Text` or `Patch` objects;
+  3. blitting: every animated artist must belong to an axes (animated title: `viz.title_axes`) and must not touch the
+     edge of the axes (otherwise it leaves a trail); static text is covered by the animated layers;
+  4. frame chosen according to the real clock (`run_animation` in `test/weight_buffer/animation.py`);
+  5. check without a screen by going through the real mechanism of `FuncAnimation` (`anim._init_draw()`, then
+     `anim._draw_next_frame(f, True)`), measure the time per frame (target < 15 ms on average) and look at some
+     frames.
+  `--save file.gif` option in every animation.
 
-## 7. Pièges de py4hw rencontrés
+## 7. py4hw pitfalls encountered
 
-- **Fausse boucle combinatoire** : le simulateur trie les blocs ayant un `propagate()` *bloc par bloc*. Deux blocs
-  qui se lisent mutuellement (même à travers des registres) provoquent « Excessive loop count in topological
-  count ». Solution utilisée : un bloc dont les sorties ne dépendent que de son état (machine de Moore) publie ses
-  sorties dans `clock()` et n'a pas de `propagate()` (c'est le cas du `controller`).
-- **Lire une sortie combinatoire** : après `Bench.step()`, on lit l'état *après* le front. Pour lire ce qu'un bloc
-  sort *pendant* un cycle, utiliser `Bench.observe()` (entrées, propagation, lecture, puis front).
-- **`import test`** tombe sur le module `test` de la bibliothèque standard : charger les bancs avec
-  `load_test_module('<bloc>')`.
-- **Polices** : matplotlib relit le fichier de police à chaque texte ; selon le système de fichiers c'est très lent.
-  `common.setup_matplotlib_fonts()` (appelé par `viz.py`) utilise la copie système quand elle existe.
-- **Vitesse de simulation** (ordre de grandeur) : un PE ≈ 400 000 cycles/s, la grille 4×4 ≈ 30 000, la puce
-  complète ≈ 11 000 à 13 000 cycles/s. Dimensionne les benchmarks en conséquence.
-- **Valeurs nulles** : dans les animations et les mesures d'activité, utilise des données non nulles, sinon un MAC
-  avec un opérande nul n'est pas vu comme actif. En WS, un MAC peut avoir lieu pendant le premier cycle de
-  rechargement des poids : ne pas exclure les cycles où `load = 1` quand on compte les MAC.
+- **False combinational loop**: the simulator sorts the blocks that have a `propagate()` *block by block*. Two blocks
+  that read each other (even through registers) cause "Excessive loop count in topological count". Solution used: a
+  block whose outputs depend only on its state (Moore machine) publishes its outputs in `clock()` and has no
+  `propagate()` (this is the case of the `controller`).
+- **Reading a combinational output**: after `Bench.step()`, you read the state *after* the edge. To read what a block
+  outputs *during* a cycle, use `Bench.observe()` (inputs, propagation, read, then edge).
+- **`import test`** picks up the `test` module of the standard library: load the testbenches with
+  `load_test_module('<block>')`.
+- **Fonts**: matplotlib rereads the font file for every text; depending on the file system, this is very slow.
+  `common.setup_matplotlib_fonts()` (called by `viz.py`) uses the system copy when it exists.
+- **Simulation speed** (order of magnitude): one PE ≈ 400,000 cycles/s, the 4×4 array ≈ 30,000, the complete chip
+  ≈ 11,000 to 13,000 cycles/s. Size the benchmarks accordingly.
+- **Zero values**: in the animations and the activity measurements, use non-zero data, otherwise a MAC with a zero
+  operand is not seen as active. In WS, a MAC can take place during the first weight reload cycle: do not exclude the
+  cycles where `load = 1` when counting the MACs.
 
-## 8. Méthode de travail avec l'utilisateur
+## 8. Working method with the user
 
-- L'utilisateur écrit en français, apprend en construisant, et veut **comprendre les compromis**.
-- **Les décisions d'architecture lui appartiennent** : explique les options et leurs conséquences, recommande, puis
-  pose la question ; consigne ensuite la décision dans le journal de `src/architecture.md` (§4). Les décisions de
-  détail que tu prends toi-même pendant l'implémentation doivent aussi y être consignées et lui être signalées.
-- Après chaque bloc ou changement : mettre à jour la section « Implémentation » de `src/<bloc>/interface.md`,
-  l'état et les résultats (§3b) de `src/architecture.md`, `test/README.md`, le README, et ce guide si besoin ;
-  vérifier que les liens des fichiers `.md` pointent vers des fichiers existants.
-- Le schéma qui a été validé pour un bloc : implémentation + `test.py` + `benchmark.py` + `animation.py` +
-  documentation, avec un compte rendu qui signale les erreurs trouvées et corrigées en route.
+- The user writes in French, learns by building, and wants to **understand the trade-offs**.
+- **Architecture decisions belong to the user**: explain the options and their consequences, make a recommendation,
+  then ask the question; then record the decision in the log of `src/architecture.md` (§4). The detail decisions you
+  make yourself during implementation must also be recorded there and reported to the user.
+- After each block or change: update the "Implementation" section of `src/<block>/interface.md`, the status and the
+  results (§3b) of `src/architecture.md`, `test/README.md`, the README, and this guide if needed; check that the links
+  in the `.md` files point to existing files.
+- The pattern that was validated for a block: implementation + `test.py` + `benchmark.py` + `animation.py` +
+  documentation, with a report that points out the errors found and fixed along the way.

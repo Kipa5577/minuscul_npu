@@ -1,22 +1,22 @@
 """
-controller — Séquenceur du GEMM (spécification : src/controller/interface.md)
+controller — GEMM sequencer (specification: src/controller/interface.md)
 
-FSM câblée qui parcourt les tuiles et émet, au cycle d'émission, les adresses SRAM, les masques,
-les commandes de la grille et les tags.
+Hardwired FSM that walks through the tiles and emits, at the emission cycle, the SRAM addresses, the masks,
+the array commands and the tags.
 
-  - Controller_OS : boucles i_t → j_t → k   ; états CLEAR, STREAM (K), FLUSH (2N − 1), DRAIN (N), TAIL (4)
-  - Controller_WS : boucles i_t → k_t → j   ; états PRELOAD (N), STREAM (N_dim), FLUSH (2N − 3), TAIL (2N + 4)
+  - Controller_OS: loops i_t → j_t → k   ; states CLEAR, STREAM (K), FLUSH (2N − 1), DRAIN (N), TAIL (4)
+  - Controller_WS: loops i_t → k_t → j   ; states PRELOAD (N), STREAM (N_dim), FLUSH (2N − 3), TAIL (2N + 4)
 
-Chronologie : une impulsion `go` présente au cycle g fait passer la FSM dans son premier état au front suivant ;
-la première émission a lieu au cycle g + 1. `busy` vaut 1 dans tous les états sauf IDLE et DONE ; pendant DONE
-(un cycle, `done` = 1), la dernière écriture de Y est terminée. `cycles` compte les cycles hors IDLE depuis le
-dernier `go` (DONE compris). Un `go` avec une dimension nulle ou supérieure à DIM_MAX va directement à DONE.
-Un `go` reçu pendant un GEMM est ignoré.
+Timeline: a `go` pulse present at cycle g moves the FSM into its first state at the next edge;
+the first emission takes place at cycle g + 1. `busy` is 1 in all states except IDLE and DONE; during DONE
+(one cycle, `done` = 1), the last write of Y is finished. `cycles` counts the cycles outside IDLE since the
+last `go` (DONE included). A `go` with a dimension equal to zero or greater than DIM_MAX goes directly to DONE.
+A `go` received during a GEMM is ignored.
 
-Description comportementale (machine de Moore) : clock() met à jour les registres d'état, les compteurs de boucles
-et le compteur de phase, puis publie les sorties décodées à partir du nouvel état. Les sorties ne dépendant que de
-l'état, elles sont stables pendant tout le cycle ; le bloc n'a pas de propagate(), ce qui évite au simulateur une
-fausse boucle combinatoire avec le host_interface (go → controller, busy → host_interface).
+Behavioural description (Moore machine): clock() updates the state registers, the loop counters and the phase
+counter, then publishes the outputs decoded from the new state. Since the outputs depend only on the state, they
+are stable during the whole cycle; the block has no propagate(), which spares the simulator a false
+combinational loop with the host_interface (go → controller, busy → host_interface).
 """
 
 from py4hw import Logic, Wire
@@ -58,13 +58,13 @@ class _Controller(Logic):
 
     def _reset_state(self):
         self.state = IDLE
-        self.cnt = 0                                       # position dans l'état courant
+        self.cnt = 0                                       # position within the current state
         self.t_out = 0                                     # i_t
-        self.t_mid = 0                                     # j_t (OS) ou k_t (WS)
-        self.M = self.K = self.Nd = 0                      # dimensions mémorisées au go
+        self.t_mid = 0                                     # j_t (OS) or k_t (WS)
+        self.M = self.K = self.Nd = 0                      # dimensions latched at go
         self.cycles_r = 0
 
-    # --- outils -------------------------------------------------------------------------
+    # --- tools --------------------------------------------------------------------------
 
     def tiles(self, D):
         return (D + self.N - 1) // self.N
@@ -82,7 +82,7 @@ class _Controller(Logic):
         raise NotImplementedError
 
     def _goto(self, state):
-        """Entre dans `state` ; les états de durée nulle sont sautés."""
+        """Enters `state`; zero-duration states are skipped."""
         self.state, self.cnt = state, 0
         if state not in (IDLE, DONE) and self.duration(state) == 0:
             self._goto(self._after(state))
@@ -90,7 +90,7 @@ class _Controller(Logic):
     def _after(self, state):
         raise NotImplementedError
 
-    # --- comportement -----------------------------------------------------------------------
+    # --- behaviour --------------------------------------------------------------------------
 
     def clock(self):
         if not self.rst_n.get():
@@ -127,7 +127,7 @@ class _Controller(Logic):
 
 
 class Controller_OS(_Controller):
-    """Boucles i_t → j_t → k : CLEAR, STREAM, FLUSH, DRAIN par tuile de sortie, puis TAIL et DONE."""
+    """Loops i_t → j_t → k: CLEAR, STREAM, FLUSH, DRAIN per output tile, then TAIL and DONE."""
 
     def __init__(self, parent, name, rst_n, go, dim_m, dim_k, dim_n, busy, done, cycles,
                  w_addr, w_re, x_addr, x_re, w_mask, x_mask, ctl, tag, drain_en, drain_row):
@@ -149,13 +149,13 @@ class Controller_OS(_Controller):
             return FLUSH
         if state == FLUSH:
             return DRAIN
-        if state == DRAIN:                                 # tuile suivante : j_t, puis i_t
+        if state == DRAIN:                                 # next tile: j_t, then i_t
             self.t_mid += 1
             if self.t_mid == self.tiles(self.Nd):
                 self.t_mid = 0
                 self.t_out += 1
             return CLEAR if self.t_out < self.tiles(self.M) else TAIL
-        return DONE                                        # après TAIL
+        return DONE                                        # after TAIL
 
     def _decode(self):
         it, jt, c = self.t_out, self.t_mid, self.cnt
@@ -175,7 +175,7 @@ class Controller_OS(_Controller):
 
 
 class Controller_WS(_Controller):
-    """Boucles i_t → k_t → j : PRELOAD, STREAM, FLUSH par couple (i_t, k_t), puis TAIL et DONE."""
+    """Loops i_t → k_t → j: PRELOAD, STREAM, FLUSH per (i_t, k_t) pair, then TAIL and DONE."""
 
     def __init__(self, parent, name, rst_n, go, dim_m, dim_k, dim_n, busy, done, cycles,
                  w_addr, w_re, x_addr, x_re, w_mask, x_mask, ctl, tag, s_valid, s_j, s_first, s_last):
@@ -197,20 +197,20 @@ class Controller_WS(_Controller):
             return STREAM
         if state == STREAM:
             return FLUSH
-        if state == FLUSH:                                 # couple suivant : k_t, puis i_t
+        if state == FLUSH:                                 # next pair: k_t, then i_t
             self.t_mid += 1
             if self.t_mid == self.tiles(self.K):
                 self.t_mid = 0
                 self.t_out += 1
             return PRELOAD if self.t_out < self.tiles(self.M) else TAIL
-        return DONE                                        # après TAIL
+        return DONE                                        # after TAIL
 
     def _decode(self):
         it, kt, c = self.t_out, self.t_mid, self.cnt
         sb = dict(s_valid=0, s_j=0, s_first=0, s_last=0)
         out = {}
         if self.state == PRELOAD:
-            k = self.N * kt + self.N - 1 - c               # la ligne de grille du bas d'abord
+            k = self.N * kt + self.N - 1 - c               # the bottom row of the array first
             out.update(w_addr=self.addr(it, k), w_re=1, ctl=1,
                        w_mask=self.lane_mask(it, self.M) if k < self.K else 0)
         elif self.state == STREAM:

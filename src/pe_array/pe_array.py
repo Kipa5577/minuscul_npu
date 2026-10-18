@@ -1,11 +1,11 @@
 """
-pe_array — Grille N×N de PE (spécification : src/pe_array/interface.md)
+pe_array — N×N array of PEs (specification: src/pe_array/interface.md)
 
-Le bloc ne contient pas de logique propre : il instancie N×N PE et les relie à leurs voisins.
-Les vecteurs « par voie » sont empaquetés : la voie l occupe les bits [W·l + W−1 : W·l].
+The block has no logic of its own: it instantiates N×N PEs and connects them to their neighbours.
+"Per-lane" vectors are packed: lane l occupies bits [W·l + W−1 : W·l].
 
-  - PE_Array_OS : PE(i,j) accumule Y[i][j] ; W entre par l'ouest, X par le nord
-  - PE_Array_WS : PE(k,i) garde W[i][k] ; X entre par l'ouest, les sommes partielles sortent au sud
+  - PE_Array_OS: PE(i,j) accumulates Y[i][j]; W enters from the west, X from the north
+  - PE_Array_WS: PE(k,i) holds W[i][k]; X enters from the west, the partial sums leave at the south
 """
 
 from py4hw import Logic, Wire, Range, ConcatenateLSBF, Constant
@@ -14,7 +14,7 @@ from src.pe.pe import PE_OS, PE_WS
 
 
 def _lanes(parent: Logic, name: str, bus: Wire, n: int) -> list:
-    """Découpe un bus empaqueté en n fils (voie 0 = bits de poids faible)."""
+    """Splits a packed bus into n wires (lane 0 = least significant bits)."""
     w = bus.getWidth() // n
     out = []
     for l in range(n):
@@ -25,7 +25,7 @@ def _lanes(parent: Logic, name: str, bus: Wire, n: int) -> list:
 
 
 class PE_Array_OS(Logic):
-    """Grille output-stationary : acc de PE(i,j) à l'indice i·N + j du bus `acc`."""
+    """Output-stationary array: acc of PE(i,j) at index i·N + j of the `acc` bus."""
 
     def __init__(self, parent, name: str, rst_n: Wire, w_west: Wire, x_north: Wire, clear: Wire,
                  acc: Wire, N: int = 4):
@@ -43,7 +43,7 @@ class PE_Array_OS(Logic):
         AW = acc.getWidth() // (N * N)
         self.N = N
 
-        # h[i][j] : poids entrant dans PE(i,j) par l'ouest ; v[i][j] : activation entrant par le nord
+        # h[i][j]: weight entering PE(i,j) from the west; v[i][j]: activation entering from the north
         h = [[lane] for lane in _lanes(self, 'w_west', w_west, N)]
         v = [_lanes(self, 'x_north', x_north, N)]
         for i in range(N):
@@ -60,7 +60,7 @@ class PE_Array_OS(Logic):
 
 
 class PE_Array_WS(Logic):
-    """Grille weight-stationary : PE(k,i) garde W[i][k] ; voie i de `psum_south` = sortie de la colonne i."""
+    """Weight-stationary array: PE(k,i) holds W[i][k]; lane i of `psum_south` = output of column i."""
 
     def __init__(self, parent, name: str, rst_n: Wire, x_west: Wire, w_north: Wire, load: Wire,
                  psum_south: Wire, N: int = 4):
@@ -81,8 +81,8 @@ class PE_Array_WS(Logic):
         zero = self.wire('zero', AW)
         Constant(self, 'zero', 0, zero)
 
-        # h[k][i] : activation entrant dans PE(k,i) par l'ouest
-        # p[k][i] : somme partielle entrant par le nord ; wl[k][i] : poids sur le chemin de préchargement
+        # h[k][i]: activation entering PE(k,i) from the west
+        # p[k][i]: partial sum entering from the north; wl[k][i]: weight on the preload path
         h = [[lane] for lane in _lanes(self, 'x_west', x_west, N)]
         p = [[zero] * N]
         wl = [_lanes(self, 'w_north', w_north, N)]

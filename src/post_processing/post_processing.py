@@ -1,19 +1,19 @@
 """
-post_processing — Biais, ReLU, requantification (spécification : src/post_processing/interface.md)
+post_processing — Bias, ReLU, requantization (specification: src/post_processing/interface.md)
 
-Pipeline de 3 étages, N voies en parallèle, une entrée par cycle :
-  S1 : a = res + biais                          (int32, modulo 2^32)
-  S2 : r = relu_en ? max(0, a) : a ; p = r × M  (M non signé, produit signé sur 48 bits)
-  S3 : q = (p + 2^(s−1)) >> s ; y = sat(q, −128, 127)   (pas d'arrondi si s = 0)
-Le bit de validité et le tag avancent avec les données ; après S3, y_we, y_addr, y_wmask et y_wdata
-pilotent l'écriture dans le banc OUT de activation_buffer.
+3-stage pipeline, N lanes in parallel, one input per cycle:
+  S1: a = res + bias                           (int32, modulo 2^32)
+  S2: r = relu_en ? max(0, a) : a ; p = r × M  (M unsigned, signed 48-bit product)
+  S3: q = (p + 2^(s−1)) >> s ; y = sat(q, −128, 127)   (no rounding if s = 0)
+The valid bit and the tag move along with the data; after S3, y_we, y_addr, y_wmask and y_wdata
+drive the write into the OUT bank of activation_buffer.
 
-Le bloc contient aussi la mémoire des biais (64 × int32), accessible par l'hôte quand busy = 0.
-Choix du biais de la voie l (row vient du tag) :
-  - PostProcessing_OS : les N voies sont une même ligne de Y  → biais[row] pour toutes
-  - PostProcessing_WS : les N voies sont N lignes consécutives → biais[row + l]
+The block also contains the bias memory (64 × int32), accessible by the host when busy = 0.
+Choice of the bias for lane l (row comes from the tag):
+  - PostProcessing_OS: the N lanes are one and the same row of Y → bias[row] for all of them
+  - PostProcessing_WS: the N lanes are N consecutive rows        → bias[row + l]
 
-Description comportementale : toutes les sorties sont des registres, mis à jour dans clock().
+Behavioural description: all outputs are registers, updated in clock().
 """
 
 from py4hw import Logic, Wire
@@ -61,19 +61,19 @@ class _PostProcessing(Logic):
         assert res.getWidth() == self.N * self.AW
         assert tag_in.getWidth() == y_addr.getWidth() + self.N + self.IW
 
-        # mémoire des biais : son contenu n'est pas réinitialisé par rst_n
+        # bias memory: its contents are not reset by rst_n
         self.bias = [0] * (1 << self.IW)
         self._reset_state()
 
     def _reset_state(self):
         N = self.N
-        # chaque étage : (valide, valeurs des N voies, tag)
+        # each stage: (valid, values of the N lanes, tag)
         self.s1 = (0, [0] * N, 0)
         self.s2 = (0, [0] * N, 0)
         self.s3 = (0, [0] * N, 0)
         self.rdata_r = 0
 
-    # --- étages -------------------------------------------------------------------------
+    # --- stages -------------------------------------------------------------------------
 
     def _tag_fields(self, tag: int):
         """tag = {y_addr, lane_mask, row}"""
@@ -102,15 +102,15 @@ class _PostProcessing(Logic):
         lo, hi = -(1 << (self.DW - 1)), (1 << (self.DW - 1)) - 1
         return valid, [min(hi, max(lo, (x + rnd) >> s)) for x in p], tag
 
-    # --- comportement -----------------------------------------------------------------------
+    # --- behaviour --------------------------------------------------------------------------
 
     def clock(self):
         if not self.rst_n.get():
             self._reset_state()
         else:
-            # pipeline : chaque étage prend la sortie de l'étage précédent (valeurs d'avant le front)
+            # pipeline: each stage takes the output of the previous stage (values from before the edge)
             self.s3, self.s2, self.s1 = self._stage3(self.s2), self._stage2(self.s1), self._stage1()
-            # port hôte de la mémoire des biais (actif quand busy = 0)
+            # host port of the bias memory (active when busy = 0)
             if not self.busy.get():
                 addr = self.bias_host_addr.get()
                 if self.bias_host_re.get():
@@ -131,10 +131,10 @@ class _PostProcessing(Logic):
 
 
 class PostProcessing_OS(_PostProcessing):
-    """Les N voies sont une même ligne de Y : elles reçoivent toutes biais[row]."""
+    """The N lanes are one and the same row of Y: they all receive bias[row]."""
     BIAS_PER_LANE = False
 
 
 class PostProcessing_WS(_PostProcessing):
-    """Les N voies sont N lignes consécutives de Y : la voie l reçoit biais[row + l]."""
+    """The N lanes are N consecutive rows of Y: lane l receives bias[row + l]."""
     BIAS_PER_LANE = True

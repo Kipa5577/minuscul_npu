@@ -1,11 +1,11 @@
 """
-Test fonctionnel du pe_array (spécification : src/pe_array/interface.md).
+Functional test of the pe_array (specification: src/pe_array/interface.md).
 
-  - câblage : comparaison cycle par cycle avec une grille de modèles de référence du pe
-  - contrat : GEMM complet avec l'injection en escalier décrite dans la spécification,
-    vérification du résultat ET du cycle exact où il devient disponible
+  - wiring: cycle-by-cycle comparison with an array of pe reference models
+  - contract: complete GEMM with the staircase injection described in the specification,
+    checking the result AND the exact cycle at which it becomes available
 
-Lancement : python test/pe_array/test.py
+Run: python test/pe_array/test.py
 """
 
 import sys
@@ -22,7 +22,7 @@ pe_test = load_test_module('pe')
 DW, AW = 8, 32
 
 
-# --- Bancs -----------------------------------------------------------------------
+# --- Benches ---------------------------------------------------------------------
 
 def bench_os(N=4):
     b = Bench(
@@ -56,10 +56,10 @@ def psum_south(b):
     return unpack(b.w['psum_south'].get(), b.N, AW)
 
 
-# --- Ordonnancement des entrées (contrats de la spécification) -------------------------
+# --- Input scheduling (contracts of the specification) ---------------------------------
 
 def os_lanes(W, X, c):
-    """Cycle c (relatif à t0) : voie i de w_west = W[i][c−i], voie j de x_north = X[c−j][j]."""
+    """Cycle c (relative to t0): lane i of w_west = W[i][c−i], lane j of x_north = X[c−j][j]."""
     N, K = W.shape
     w = [W[i][c - i] if 0 <= c - i < K else 0 for i in range(N)]
     x = [X[c - j][j] if 0 <= c - j < K else 0 for j in range(N)]
@@ -67,7 +67,7 @@ def os_lanes(W, X, c):
 
 
 def run_os_tile(b, W, X):
-    """Injecte une tuile ; renvoie la liste des matrices acc après chaque cycle."""
+    """Injects a tile; returns the list of acc matrices after each cycle."""
     N, K = W.shape
     hist = []
     for c in range(K + 2 * N):
@@ -78,20 +78,20 @@ def run_os_tile(b, W, X):
 
 
 def ws_preload(b, W):
-    """W est M×K = N×N : la ligne de grille k reçoit W[:, k]. On présente k = N−1 en premier."""
+    """W is M×K = N×N: array row k receives W[:, k]. k = N−1 is presented first."""
     N = b.N
     for k in reversed(range(N)):
         b.step(w_north=pack(W[:, k], DW), x_west=0, load=1)
 
 
 def ws_x_lanes(X, c):
-    """Cycle c (relatif à t0) : voie k de x_west = X[k][c−k]."""
+    """Cycle c (relative to t0): lane k of x_west = X[k][c−k]."""
     N, J = X.shape
     return pack([X[k][c - k] if 0 <= c - k < J else 0 for k in range(N)], DW)
 
 
 def run_ws_stream(b, X, extra=0):
-    """Envoie les J colonnes de X ; renvoie la liste des psum_south après chaque cycle."""
+    """Sends the J columns of X; returns the list of psum_south after each cycle."""
     N, J = X.shape
     hist = []
     for c in range(J + 2 * N + extra):
@@ -101,11 +101,11 @@ def run_ws_stream(b, X, extra=0):
 
 
 def ws_outputs(hist, N, J):
-    """La voie i porte Y[i][j] au cycle t0 + j + i + N, donc après le pas d'indice j + i + N − 1."""
+    """Lane i carries Y[i][j] at cycle t0 + j + i + N, hence after the step of index j + i + N − 1."""
     return np.array([[hist[j + i + N - 1][i] for j in range(J)] for i in range(N)])
 
 
-# --- Modèles de référence (grille de PE de référence) ----------------------------------
+# --- Reference models (array of reference PEs) ----------------------------------------
 
 class RefArray_OS:
     def __init__(self, N):
@@ -144,7 +144,7 @@ class RefArray_WS:
         return [p.psum for p in self.pe[self.N - 1]]
 
 
-# --- Tests OS ----------------------------------------------------------------------------
+# --- OS tests ----------------------------------------------------------------------------
 
 def test_os_reset():
     b = bench_os()
@@ -155,23 +155,23 @@ def test_os_reset():
     assert not acc_matrix(b).any()
 
 
-def test_os_contrat_gemm():
+def test_os_gemm_contract():
     rng = np.random.default_rng(10)
     for N in (1, 2, 3, 4, 8):
         for K in (1, 5, 16):
             W = rng.integers(-128, 128, (N, K))
             X = rng.integers(-128, 128, (K, N))
-            W[N - 1][K - 1] = X[K - 1][N - 1] = 3          # dernier terme non nul
+            W[N - 1][K - 1] = X[K - 1][N - 1] = 3          # last term non-zero
             b = bench_os(N)
             hist = run_os_tile(b, W, X)
-            fin = K + 2 * N - 3                            # pas après lequel acc est complet
-            assert (hist[fin] == W @ X).all(), f'N={N} K={K} : résultat faux'
+            fin = K + 2 * N - 3                            # step after which acc is complete
+            assert (hist[fin] == W @ X).all(), f'N={N} K={K}: wrong result'
             if fin > 0:
-                assert not (hist[fin - 1] == W @ X).all(), f'N={N} K={K} : résultat disponible trop tôt'
-            assert (hist[-1] == W @ X).all(), f'N={N} K={K} : résultat non maintenu'
+                assert not (hist[fin - 1] == W @ X).all(), f'N={N} K={K}: result available too early'
+            assert (hist[-1] == W @ X).all(), f'N={N} K={K}: result not held'
 
 
-def test_os_deux_tuiles_avec_clear():
+def test_os_two_tiles_with_clear():
     rng = np.random.default_rng(11)
     N, K = 4, 8
     b = bench_os(N)
@@ -191,7 +191,7 @@ def test_os_extremes():
     assert (hist[-1] == K * 16384).all()
 
 
-def test_os_aleatoire_cycle_par_cycle():
+def test_os_random_cycle_by_cycle():
     random.seed(12)
     N = 4
     b, ref = bench_os(N), RefArray_OS(N)
@@ -205,7 +205,7 @@ def test_os_aleatoire_cycle_par_cycle():
         assert (acc_matrix(b) == ref.acc()).all(), f'cycle {b.cycle}'
 
 
-# --- Tests WS ----------------------------------------------------------------------------
+# --- WS tests ----------------------------------------------------------------------------
 
 def test_ws_reset():
     b = bench_ws()
@@ -216,7 +216,7 @@ def test_ws_reset():
     assert all(pe.w_r == 0 for row in b.dut.pes for pe in row)
 
 
-def test_ws_prechargement():
+def test_ws_preload():
     rng = np.random.default_rng(13)
     for N in (1, 2, 4, 8):
         W = rng.integers(-128, 128, (N, N))
@@ -225,10 +225,10 @@ def test_ws_prechargement():
         for k in range(N):
             for i in range(N):
                 got = unpack(b.dut.pes[k][i].w_load_out.get(), 1, DW)[0]
-                assert got == W[i][k], f'N={N} PE({k},{i}) : {got} ≠ W[{i}][{k}] = {W[i][k]}'
+                assert got == W[i][k], f'N={N} PE({k},{i}): {got} ≠ W[{i}][{k}] = {W[i][k]}'
 
 
-def test_ws_contrat_gemm():
+def test_ws_gemm_contract():
     rng = np.random.default_rng(14)
     for N in (1, 2, 3, 4, 8):
         for J in (1, 5, 16):
@@ -240,11 +240,11 @@ def test_ws_contrat_gemm():
             assert (ws_outputs(hist, N, J) == W @ X).all(), f'N={N} J={J}'
 
 
-def test_ws_ecart_minimal_avant_rechargement():
+def test_ws_minimum_gap_before_reload():
     """
-    Entre la dernière colonne de X (voie 0, cycle a) et le premier load du préchargement suivant,
-    il faut au moins 2N − 2 cycles (soit 2N − 3 cycles de FLUSH côté controller).
-    Avec 2N − 2 le résultat est juste ; avec un cycle de moins, la dernière colonne est fausse.
+    Between the last column of X (lane 0, cycle a) and the first load of the next preload,
+    at least 2N − 2 cycles are needed (i.e. 2N − 3 cycles of FLUSH on the controller side).
+    With 2N − 2 the result is correct; with one cycle less, the last column is wrong.
     """
     rng = np.random.default_rng(15)
     for N in (2, 3, 4, 8):
@@ -253,30 +253,30 @@ def test_ws_ecart_minimal_avant_rechargement():
         W2 = rng.integers(-128, 0, (N, N))
         X1 = rng.integers(1, 128, (N, J))
         X2 = rng.integers(1, 128, (N, J))
-        for ecart, attendu_juste in ((2 * N - 2, True), (2 * N - 3, False)):
+        for gap, expect_correct in ((2 * N - 2, True), (2 * N - 3, False)):
             b = bench_ws(N)
             ws_preload(b, W1)
-            # flux X1 puis attente : la voie 0 reçoit la dernière colonne au cycle a = J − 1
+            # stream X1 then wait: lane 0 receives the last column at cycle a = J − 1
             hist = []
-            for c in range(J - 1 + ecart):
+            for c in range(J - 1 + gap):
                 b.step(x_west=ws_x_lanes(X1, c), w_north=0, load=0)
                 hist.append(psum_south(b))
-            # préchargement de W2 (la voie k de x_west continue l'escalier de X1 pendant ce temps)
+            # preload of W2 (lane k of x_west continues the staircase of X1 meanwhile)
             for n, k in enumerate(reversed(range(N))):
-                c = J - 1 + ecart + n
+                c = J - 1 + gap + n
                 b.step(x_west=ws_x_lanes(X1, c), w_north=pack(W2[:, k], DW), load=1)
                 hist.append(psum_south(b))
             for _ in range(2 * N):
                 b.step(x_west=0, w_north=0, load=0)
                 hist.append(psum_south(b))
-            juste = (ws_outputs(hist, N, J) == W1 @ X1).all()
-            assert juste == attendu_juste, f'N={N} écart={ecart} : juste={juste}, attendu {attendu_juste}'
-            # et la grille contient bien W2 ensuite
+            correct = (ws_outputs(hist, N, J) == W1 @ X1).all()
+            assert correct == expect_correct, f'N={N} gap={gap}: correct={correct}, expected {expect_correct}'
+            # and the array does hold W2 afterwards
             hist2 = run_ws_stream(b, X2)
             assert (ws_outputs(hist2, N, J) == W2 @ X2).all()
 
 
-def test_ws_aleatoire_cycle_par_cycle():
+def test_ws_random_cycle_by_cycle():
     random.seed(16)
     N = 4
     b, ref = bench_ws(N), RefArray_WS(N)

@@ -1,9 +1,9 @@
 """
-Outils graphiques communs aux benchmarks et aux animations.
+Graphics tools shared by the benchmarks and the animations.
 
-  - palette et style des figures
-  - rendu rapide pour les animations (≥ 30 images/s) : les jetons, cases et chiffres sont des tracés
-    regroupés en collections (une seule opération de dessin chacune), à utiliser avec le blitting
+  - palette and style of the figures
+  - fast rendering for the animations (≥ 30 frames/s): tokens, cells and digits are paths
+    grouped into collections (a single draw operation each), to be used with blitting
 """
 
 import numpy as np
@@ -27,13 +27,13 @@ TEXT_2 = '#52514e'
 GRID = '#e4e3df'
 REF = '#8a8984'
 CELL = '#eeede9'
-C_OS = '#2a78d6'         # variante output-stationary
-C_WS = '#eb6834'         # variante weight-stationary
+C_OS = '#2a78d6'         # output-stationary variant
+C_WS = '#eb6834'         # weight-stationary variant
 TINT_OS = '#d6e5f8'
 TINT_WS = '#fbe0d3'
-C_W = '#6250d6'          # jetons de poids
-C_X = '#138a60'          # jetons d'activation
-C_P = '#eda100'          # jetons de somme partielle
+C_W = '#6250d6'          # weight tokens
+C_X = '#138a60'          # activation tokens
+C_P = '#eda100'          # partial-sum tokens
 ERR = '#e34948'
 
 BENCH_RC = {
@@ -53,7 +53,7 @@ def ease(u):
     return u * u * (3 - 2 * u)
 
 
-# --- Rendu rapide : boîtes arrondies et chiffres sous forme de tracés ------------------------------
+# --- Fast rendering: rounded boxes and digits as paths --------------------------------------------
 
 _BOXES = {}
 _GLYPHS = {}
@@ -62,7 +62,7 @@ FONT_REG = FontProperties(family='DejaVu Sans')
 
 
 def box_path(size, rounding, height=None):
-    """Contour d'une boîte arrondie (size × height), centrée sur l'origine (unités de données)."""
+    """Outline of a rounded box (size × height), centred on the origin (data units)."""
     height = size if height is None else height
     key = (size, height, rounding)
     if key not in _BOXES:
@@ -76,7 +76,7 @@ RECT = (np.array([[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5], [-0.5, -0.
 
 
 def glyph_path(s, bold, pt):
-    """Tracé d'une chaîne, centré sur l'origine, en points typographiques (axe y vers le haut)."""
+    """Path of a string, centred on the origin, in typographic points (y axis pointing up)."""
     key = (s, bold, pt)
     if key not in _GLYPHS:
         tp = TextPath((0, 0), s, size=pt, prop=FONT_BOLD if bold else FONT_REG)
@@ -88,7 +88,7 @@ def glyph_path(s, bold, pt):
 
 
 class Layer:
-    """Une collection de tracés redessinée à chaque image (une seule opération de dessin)."""
+    """A collection of paths redrawn at every frame (a single draw operation)."""
 
     def __init__(self, ax, zorder, lw=0.0, edge=None):
         self.ax = ax
@@ -116,14 +116,14 @@ class Layer:
 
 
 def data_per_point(ax):
-    """Facteurs (x, y) pour convertir des points typographiques en unités de données (y peut être < 0)."""
+    """(x, y) factors to convert typographic points into data units (y may be < 0)."""
     t = ax.transData.transform([(0, 0), (1, 1)])
     px = ax.figure.dpi / 72
     return px / (t[1][0] - t[0][0]), px / (t[1][1] - t[0][1])
 
 
 class TextLayer(Layer):
-    """Chiffres et petits textes dessinés comme des tracés (bien plus rapide que des objets Text)."""
+    """Digits and short texts drawn as paths (much faster than Text objects)."""
 
     def text(self, x, y, s, color, alpha=1.0, bold=True, pt=8):
         if not s or alpha <= 0:
@@ -140,7 +140,7 @@ class TextLayer(Layer):
 
 
 class TokenLayers:
-    """Jetons arrondis avec une valeur : boîtes + chiffres, en deux collections."""
+    """Rounded tokens carrying a value: boxes + digits, in two collections."""
 
     def __init__(self, ax, zorder=6):
         self.boxes = Layer(ax, zorder, lw=1.2, edge='white')
@@ -162,7 +162,7 @@ class TokenLayers:
 
 
 def title_axes(fig, rect=(0, 0.955, 1, 0.045)):
-    """Axe invisible pour un titre animé (le blitting ne redessine que des artistes rattachés à un axe)."""
+    """Invisible axes for an animated title (blitting only redraws artists attached to an axes)."""
     ax = fig.add_axes(rect)
     ax.axis('off')
     return ax

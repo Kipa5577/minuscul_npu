@@ -1,85 +1,85 @@
-# host_interface — Bus hôte et registres
+# host_interface — Host bus and registers
 
-Le bloc décode le bus parallèle de 32 bits, contient les registres de configuration et de statut,
-et redirige les accès vers les fenêtres mémoire (voir la carte mémoire en D7).
+This block decodes the 32-bit parallel bus, holds the configuration and status registers, and redirects the accesses
+to the memory windows (see the memory map in D7).
 
-## Paramètres
-`N` = 4 (la carte mémoire suppose un mot de buffer de 32 bits), `DIM_MAX` = 64, `BAW` = 10, `IW` = 6, `DATAFLOW`
+## Parameters
+`N` = 4 (the memory map assumes a 32-bit buffer word), `DIM_MAX` = 64, `BAW` = 10, `IW` = 6, `DATAFLOW`
 
-## Ports côté bus
-| Signal | Dir | Largeur | Description |
+## Bus-side ports
+| Signal | Dir | Width | Description |
 |---|---|---|---|
 | `clk`, `rst_n` | in | 1 | |
-| `bus_addr` | in | 13 | adresse de mot |
+| `bus_addr` | in | 13 | word address |
 | `bus_wdata` | in | 32 | |
 | `bus_we` | in | 1 | |
 | `bus_re` | in | 1 | |
-| `bus_rdata` | out | 32 | **latence 1** pour toutes les adresses |
+| `bus_rdata` | out | 32 | **latency 1** for all addresses |
 
-## Ports internes
-| Signal | Dir | Largeur | Vers / depuis |
+## Internal ports
+| Signal | Dir | Width | To / from |
 |---|---|---|---|
-| `dim_m`, `dim_k`, `dim_n` | out | 7 chacun | `controller` |
+| `dim_m`, `dim_k`, `dim_n` | out | 7 each | `controller` |
 | `req_mult` | out | 16 | `post_processing` |
 | `req_shift` | out | 5 | `post_processing` |
 | `relu_en` | out | 1 | `post_processing` |
-| `go` | out | 1 | impulsion vers le `controller` |
+| `go` | out | 1 | pulse to the `controller` |
 | `busy` | in | 1 | `controller` |
-| `done` | in | 1 | impulsion du `controller` |
+| `done` | in | 1 | pulse from the `controller` |
 | `cycles` | in | 32 | `controller` |
-| `host_wdata` | out | 32 | commun à toutes les mémoires (= `bus_wdata`) |
-| `wb_addr`, `wb_we`, `wb_re` / `wb_rdata` | out / in | BAW, 1, 1 / 32 | `weight_buffer` (port hôte) |
-| `ab_addr`, `ab_we`, `ab_re` / `ab_rdata` | out / in | BAW+1, 1, 1 / 32 | `activation_buffer` (port hôte) |
-| `bias_addr`, `bias_we`, `bias_re` / `bias_rdata` | out / in | IW, 1, 1 / 32 | `post_processing` (port des biais) |
+| `host_wdata` | out | 32 | shared by all memories (= `bus_wdata`) |
+| `wb_addr`, `wb_we`, `wb_re` / `wb_rdata` | out / in | BAW, 1, 1 / 32 | `weight_buffer` (host port) |
+| `ab_addr`, `ab_we`, `ab_re` / `ab_rdata` | out / in | BAW+1, 1, 1 / 32 | `activation_buffer` (host port) |
+| `bias_addr`, `bias_we`, `bias_re` / `bias_rdata` | out / in | IW, 1, 1 / 32 | `post_processing` (bias port) |
 
-## Décodage d'adresse
-| `bus_addr[12:10]` | Cible | Adresse transmise |
+## Address decoding
+| `bus_addr[12:10]` | Target | Forwarded address |
 |---|---|---|
-| `000` | registres | `bus_addr[3:0]` |
+| `000` | registers | `bus_addr[3:0]` |
 | `001` | `WEIGHT` | `wb_addr = bus_addr[9:0]` |
-| `010`, `011` | `ACT_IN`, `ACT_OUT` | `ab_addr = bus_addr[10:0]` (le bit 10 choisit le banc) |
+| `010`, `011` | `ACT_IN`, `ACT_OUT` | `ab_addr = bus_addr[10:0]` (bit 10 selects the bank) |
 | `100` | `BIAS` | `bias_addr = bus_addr[5:0]` |
-| autres | — | lecture de 0, écriture ignorée |
+| others | — | reads return 0, writes are ignored |
 
-## Registres
-| Adr. | Nom | Champs | Reset |
+## Registers
+| Addr. | Name | Fields | Reset |
 |---|---|---|---|
-| 0 | `ID` (RO) | [3:0] N · [4] DATAFLOW (0 = OS, 1 = WS) · [15:8] DIM_MAX · [31:24] version = 1 | constante |
-| 1 | `CTRL` | [0] `GO` (écrire 1 envoie l'impulsion, se relit 0) · [1] `RELU_EN` | 0 |
-| 2 | `STATUS` (RO) | [0] `BUSY` · [1] `DONE` (mis à 1 par `done`, remis à 0 par `GO`) | 0 |
+| 0 | `ID` (RO) | [3:0] N · [4] DATAFLOW (0 = OS, 1 = WS) · [15:8] DIM_MAX · [31:24] version = 1 | constant |
+| 1 | `CTRL` | [0] `GO` (writing 1 sends the pulse, reads back as 0) · [1] `RELU_EN` | 0 |
+| 2 | `STATUS` (RO) | [0] `BUSY` · [1] `DONE` (set to 1 by `done`, cleared to 0 by `GO`) | 0 |
 | 3–5 | `DIM_M/K/N` | [6:0] | 0 |
 | 6 | `REQ_MULT` | [15:0] | 1 |
 | 7 | `REQ_SHIFT` | [4:0] | 0 |
 | 8 | `CYCLES` (RO) | [31:0] | 0 |
 
-- Avec les valeurs de reset, la requantification calcule `y = sat8(acc + b)`.
-- Le NPU est **occupé** quand le controller a `busy = 1` **ou** qu'une impulsion `go` est en cours. Le controller ne
-  passe `busy` à 1 qu'un cycle après l'impulsion : sans cette règle, un accès de l'hôte juste après GO passerait
-  avant le début du calcul (défaut trouvé par les tests de `npu_top`).
-- Quand le NPU est occupé : les écritures de configuration, les `GO` et **tous les accès aux mémoires** (WEIGHT,
-  ACT_IN, ACT_OUT, BIAS) sont ignorés, et `STATUS.BUSY` vaut 1. Les registres restent lisibles.
-- La lecture de `bus_rdata` passe par un multiplexeur dont la sélection est mémorisée au cycle de `bus_re`,
-  ce qui l'aligne sur la latence de 1 des mémoires.
-- `irq = STATUS.DONE` est exporté par `npu_top`.
+- With the reset values, the requantization computes `y = sat8(acc + b)`.
+- The NPU is **busy** when the controller has `busy = 1` **or** a `go` pulse is in progress. The controller only sets
+  `busy` to 1 one cycle after the pulse: without this rule, a host access right after GO would go through before the
+  computation starts (defect found by the `npu_top` tests).
+- When the NPU is busy: configuration writes, `GO` and **all memory accesses** (WEIGHT, ACT_IN, ACT_OUT, BIAS) are
+  ignored, and `STATUS.BUSY` is 1. The registers remain readable.
+- The read of `bus_rdata` goes through a multiplexer whose selection is latched at the `bus_re` cycle, which aligns it
+  with the latency of 1 of the memories.
+- `irq = STATUS.DONE` is exported by `npu_top`.
 
 ---
 
-## Implémentation
+## Implementation
 
-- Fichier : [`host_interface.py`](host_interface.py) — classe `HostInterface(…, dataflow='OS', N=4)`.
-- `clock()` : registres de configuration, impulsion `go` (registre d'un cycle), DONE mémorisé (GO prioritaire si les
-  deux arrivent au même cycle), cible et valeur de registre mémorisées au cycle de `bus_re`.
-- `propagate()` : décodage d'adresse vers les ports hôte des mémoires (combinatoire, forcé à 0 quand le NPU est
-  occupé), sorties de configuration, `irq`, et multiplexeur de `bus_rdata` d'après la cible mémorisée.
-- Une écriture de GO au cycle t produit `go` pendant le cycle t + 1 ; le calcul commence au cycle t + 2.
+- File: [`host_interface.py`](host_interface.py) — class `HostInterface(…, dataflow='OS', N=4)`.
+- `clock()`: configuration registers, `go` pulse (one-cycle register), latched DONE (GO has priority if both arrive in
+  the same cycle), target and register value latched at the `bus_re` cycle.
+- `propagate()`: address decoding to the host ports of the memories (combinational, forced to 0 when the NPU is busy),
+  configuration outputs, `irq`, and `bus_rdata` multiplexer according to the latched target.
+- A write of GO at cycle t produces `go` during cycle t + 1; the computation starts at cycle t + 2.
 
-| Constructeur | Ports, dans l'ordre |
+| Constructor | Ports, in order |
 |---|---|
 | `HostInterface(parent, name, …, dataflow, N)` | `rst_n, bus_addr, bus_wdata, bus_we, bus_re, bus_rdata, dim_m, dim_k, dim_n, req_mult, req_shift, relu_en, go, busy, done, cycles, host_wdata, wb_addr, wb_we, wb_re, wb_rdata, ab_addr, ab_we, ab_re, ab_rdata, bias_addr, bias_we, bias_re, bias_rdata, irq` |
 
-**Vérification** ([`test/host_interface/`](../../test/host_interface/)) : ID et valeurs de reset, registres et largeur
-de leurs champs, décodage de chaque fenêtre, impulsion `go`, DONE et `irq`, blocage pendant `busy` et pendant
-l'impulsion `go`, latence de lecture 1 pour toutes les cibles.
+**Verification** ([`test/host_interface/`](../../test/host_interface/)): ID and reset values, registers and width of
+their fields, decoding of each window, `go` pulse, DONE and `irq`, blocking during `busy` and during the `go` pulse,
+read latency of 1 for all targets.
 
-**Mesuré sur la puce complète** : le passage par le bus ramène le débit d'une couche 64³ de 13,5 à 11,6 MAC/cycle
-en OS (de 14,0 à 12,0 en WS) ; pour une couche 4³, l'hôte occupe plus de la moitié du temps.
+**Measured on the complete chip**: going through the bus brings the throughput of a 64³ layer down from 13.5 to 11.6
+MACs/cycle in OS (from 14.0 to 12.0 in WS); for a 4³ layer, the host takes up more than half of the time.

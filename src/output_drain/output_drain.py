@@ -1,21 +1,21 @@
 """
-output_drain — Collecte des résultats de la grille (spécification : src/output_drain/interface.md)
+output_drain — Collecting the results from the array (specification: src/output_drain/interface.md)
 
-Sortie commune aux deux variantes : N voies int32 (`res`) + `res_valid` + `tag_out`.
+Output common to both variants: N int32 lanes (`res`) + `res_valid` + `tag_out`.
 
-  - OutputDrain_OS : lit une ligne d'accumulateurs de la grille par cycle (vidage d'une tuile en N cycles)
-  - OutputDrain_WS : redresse la sortie en escalier de la grille, retarde le sideband du controller
-                     de 2N cycles, et additionne les sommes partielles des tuiles successives de K
-                     dans une mémoire d'accumulateurs (une entrée par colonne j)
+  - OutputDrain_OS: reads one row of accumulators from the array per cycle (draining a tile in N cycles)
+  - OutputDrain_WS: deskews the staircase output of the array, delays the controller sideband
+                    by 2N cycles, and adds up the partial sums of the successive K tiles
+                    in an accumulator memory (one entry per column j)
 
-Description comportementale : toutes les sorties sont des registres, mis à jour dans clock().
+Behavioural description: all outputs are registers, updated in clock().
 """
 
 from py4hw import Logic, Wire
 
 
 class OutputDrain_OS(Logic):
-    """res ← ligne drain_row des accumulateurs ; res_valid ← drain_en ; tag_out ← tag_in (latence 1)."""
+    """res ← row drain_row of the accumulators; res_valid ← drain_en; tag_out ← tag_in (latency 1)."""
 
     def __init__(self, parent, name: str, rst_n: Wire, acc: Wire, drain_en: Wire, drain_row: Wire,
                  tag_in: Wire, res: Wire, res_valid: Wire, tag_out: Wire, N: int = 4):
@@ -32,7 +32,7 @@ class OutputDrain_OS(Logic):
 
         self.N = N
         assert (1 << drain_row.getWidth()) >= N
-        self.row_w = res.getWidth()                       # N·AW bits : une ligne de la grille
+        self.row_w = res.getWidth()                       # N·AW bits: one row of the array
         assert acc.getWidth() == self.N * self.row_w
         assert tag_out.getWidth() == tag_in.getWidth()
 
@@ -46,7 +46,7 @@ class OutputDrain_OS(Logic):
         else:
             self.valid_r = self.drain_en.get()
             if self.valid_r:
-                # la ligne r occupe les bits [r·N·AW, (r+1)·N·AW) du bus acc (élément (i, j) à l'indice i·N + j)
+                # row r occupies bits [r·N·AW, (r+1)·N·AW) of the acc bus (element (i, j) at index i·N + j)
                 r = self.drain_row.get()
                 self.res_r = (self.acc.get() >> (r * self.row_w)) & ((1 << self.row_w) - 1)
                 self.tag_r = self.tag_in.get()
@@ -58,10 +58,10 @@ class OutputDrain_OS(Logic):
 
 class OutputDrain_WS(Logic):
     """
-    Redressement (la voie i traverse N−1−i registres) + ligne à retard de 2N cycles pour le sideband
-    + mémoire d'accumulateurs indexée par s_j :
-        somme = s_first ? psum : accmem[s_j] + psum
-        s_last ? (res ← somme, res_valid ← 1, tag_out ← tag) : accmem[s_j] ← somme
+    Deskewing (lane i goes through N−1−i registers) + 2N-cycle delay line for the sideband
+    + accumulator memory indexed by s_j:
+        total = s_first ? psum : accmem[s_j] + psum
+        s_last ? (res ← total, res_valid ← 1, tag_out ← tag) : accmem[s_j] ← total
     """
 
     def __init__(self, parent, name: str, rst_n: Wire, psum_south: Wire,
@@ -86,14 +86,14 @@ class OutputDrain_WS(Logic):
         self.mask = (1 << self.AW) - 1
         self.depth = 1 << s_j.getWidth()
 
-        # mémoire d'accumulateurs : son contenu n'est pas réinitialisé par rst_n
+        # accumulator memory: its contents are not reset by rst_n
         self.accmem = [[0] * N for _ in range(self.depth)]
         self._reset_state()
 
     def _reset_state(self):
         N = self.N
-        self.deskew = [[0] * (N - 1 - i) for i in range(N)]      # voie i : N−1−i registres
-        self.sideband = [None] * (2 * N)                          # ligne à retard de 2N cycles
+        self.deskew = [[0] * (N - 1 - i) for i in range(N)]      # lane i: N−1−i registers
+        self.sideband = [None] * (2 * N)                          # 2N-cycle delay line
         self.res_r = [0] * N
         self.valid_r = 0
         self.tag_r = 0
@@ -113,21 +113,21 @@ class OutputDrain_WS(Logic):
         else:
             N = self.N
             south = self._lanes(self.psum_south.get())
-            # valeurs visibles pendant ce cycle (avant le front)
+            # values visible during this cycle (before the edge)
             aligned = [self.deskew[i][-1] if N - 1 - i else south[i] for i in range(N)]
             sb = self.sideband[-1]
 
             self.valid_r = 0
             if sb is not None and sb['valid']:
                 j = sb['j']
-                somme = aligned if sb['first'] else [(a + p) & self.mask
+                total = aligned if sb['first'] else [(a + p) & self.mask
                                                      for a, p in zip(self.accmem[j], aligned)]
                 if sb['last']:
-                    self.res_r, self.valid_r, self.tag_r = somme, 1, sb['tag']
+                    self.res_r, self.valid_r, self.tag_r = total, 1, sb['tag']
                 else:
-                    self.accmem[j] = somme
+                    self.accmem[j] = total
 
-            # avance des registres de redressement et de la ligne à retard
+            # advance the deskew registers and the delay line
             for i in range(N - 1):
                 self.deskew[i] = [south[i]] + self.deskew[i][:-1]
             self.sideband = [dict(valid=self.s_valid.get(), j=self.s_j.get(), first=self.s_first.get(),

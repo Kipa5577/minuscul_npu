@@ -1,20 +1,20 @@
-# pe_array — Grille N×N de PE
+# pe_array — N×N array of PEs
 
-Le bloc ne contient que de la structure : il instancie N×N `pe` et les relie à leurs voisins.
-Il n'a aucune logique propre. Il existe une variante par dataflow.
+This block contains only structure: it instantiates N×N `pe` and connects them to their neighbours.
+It has no logic of its own. There is one variant per dataflow.
 
-## Paramètres
-| Nom | Défaut | Rôle |
+## Parameters
+| Name | Default | Role |
 |---|---|---|
-| `N` | 4 | côté de la grille |
-| `DW` | 8 | largeur d'une donnée |
-| `AW` | 32 | largeur des accumulateurs |
+| `N` | 4 | side of the array |
+| `DW` | 8 | width of a data word |
+| `AW` | 32 | width of the accumulators |
 
-Les vecteurs « par voie » sont empaquetés : la voie `l` occupe les bits `[W·l + W−1 : W·l]`.
+"Per-lane" vectors are packed: lane `l` occupies bits `[W·l + W−1 : W·l]`.
 
 ---
 
-## Variante OS
+## OS variant
 
 ```
             x_north[0]  x_north[1] ...
@@ -25,34 +25,34 @@ w_west[1] → PE(1,0) →  PE(1,1) → ...
 ```
 
 ### Ports
-| Signal | Dir | Largeur | Description |
+| Signal | Dir | Width | Description |
 |---|---|---|---|
 | `clk`, `rst_n` | in | 1 | |
-| `w_west` | in | N·DW | voie i → `w_in` de PE(i,0) |
-| `x_north` | in | N·DW | voie j → `x_in` de PE(0,j) |
-| `clear` | in | 1 | diffusé à tous les PE |
-| `acc` | out | N·N·AW | accumulateur de PE(i,j) à l'indice `i·N + j` |
+| `w_west` | in | N·DW | lane i → `w_in` of PE(i,0) |
+| `x_north` | in | N·DW | lane j → `x_in` of PE(0,j) |
+| `clear` | in | 1 | broadcast to all PEs |
+| `acc` | out | N·N·AW | accumulator of PE(i,j) at index `i·N + j` |
 
-### Câblage interne
-- `PE(i,j).w_in = PE(i,j−1).w_out`, et `PE(i,j).x_in = PE(i−1,j).x_out`.
-- Les sorties est et sud des PE du bord ne sont pas connectées.
+### Internal wiring
+- `PE(i,j).w_in = PE(i,j−1).w_out`, and `PE(i,j).x_in = PE(i−1,j).x_out`.
+- The east and south outputs of the edge PEs are not connected.
 
-### Latences et contrat d'entrée
-- Une valeur présentée sur la voie i de `w_west` au cycle t atteint PE(i,j) au cycle t + j.
-- Une valeur présentée sur la voie j de `x_north` au cycle t atteint PE(i,j) au cycle t + i.
-- **Contrat** : si `W[i][k]` est présenté sur la voie i au cycle `t0 + i + k`, et `X[k][j]` sur la voie j au cycle `t0 + j + k`,
-  alors PE(i,j) calcule le terme k pendant le cycle `t0 + i + j + k`.
-- Après un `clear`, `acc(i,j) = Σ_k W[i][k]·X[k][j]` est lisible **à partir du cycle `t0 + K + 2(N−1)`**.
+### Latencies and input contract
+- A value presented on lane i of `w_west` at cycle t reaches PE(i,j) at cycle t + j.
+- A value presented on lane j of `x_north` at cycle t reaches PE(i,j) at cycle t + i.
+- **Contract**: if `W[i][k]` is presented on lane i at cycle `t0 + i + k`, and `X[k][j]` on lane j at cycle
+  `t0 + j + k`, then PE(i,j) computes term k during cycle `t0 + i + j + k`.
+- After a `clear`, `acc(i,j) = Σ_k W[i][k]·X[k][j]` can be read **from cycle `t0 + K + 2(N−1)` onwards**.
 
-### Coût (N = 4)
-16 PE, soit 768 bascules, 16 multiplieurs et 512 fils de sortie (`acc`).
+### Cost (N = 4)
+16 PEs, i.e. 768 flip-flops, 16 multipliers and 512 output wires (`acc`).
 
 ---
 
-## Variante WS
+## WS variant
 
 ```
-              w_north[0]  w_north[1] ...   (préchargement)
+              w_north[0]  w_north[1] ...   (preload)
 psum = 0         ↓           ↓
 x_west[0] →  PE(0,0) →  PE(0,1) → ...
                  ↓           ↓
@@ -60,52 +60,52 @@ x_west[1] →  PE(1,0) →  PE(1,1) → ...
                  ↓           ↓
             psum_south[0] psum_south[1]
 ```
-PE(k,i) contient `W[i][k]` : la ligne k de la grille correspond à l'entrée k, la colonne i à la sortie i.
+PE(k,i) holds `W[i][k]`: row k of the array corresponds to input k, column i to output i.
 
 ### Ports
-| Signal | Dir | Largeur | Description |
+| Signal | Dir | Width | Description |
 |---|---|---|---|
 | `clk`, `rst_n` | in | 1 | |
-| `x_west` | in | N·DW | voie k → `x_in` de PE(k,0) |
-| `w_north` | in | N·DW | voie i → `w_load_in` de PE(0,i) |
-| `load` | in | 1 | diffusé à tous les PE |
-| `psum_south` | out | N·AW | voie i = `psum_out` de PE(N−1,i) |
+| `x_west` | in | N·DW | lane k → `x_in` of PE(k,0) |
+| `w_north` | in | N·DW | lane i → `w_load_in` of PE(0,i) |
+| `load` | in | 1 | broadcast to all PEs |
+| `psum_south` | out | N·AW | lane i = `psum_out` of PE(N−1,i) |
 
-### Câblage interne
+### Internal wiring
 - `PE(k,i).x_in = PE(k,i−1).x_out`
-- `PE(k,i).psum_in = PE(k−1,i).psum_out`, et 0 pour la ligne k = 0
-- `PE(k,i).w_load_in = PE(k−1,i).w_load_out`, et `w_north[i]` pour la ligne k = 0
+- `PE(k,i).psum_in = PE(k−1,i).psum_out`, and 0 for row k = 0
+- `PE(k,i).w_load_in = PE(k−1,i).w_load_out`, and `w_north[i]` for row k = 0
 
-### Préchargement
-- Il dure N cycles avec `load = 1`. La valeur présentée au n-ième cycle (n = 0..N−1) finit dans la ligne `N−1−n`.
-- Il faut donc présenter **en premier la ligne de poids qui ira en bas**, c'est-à-dire la plus grande valeur de k.
+### Preload
+- It lasts N cycles with `load = 1`. The value presented at the n-th cycle (n = 0..N−1) ends up in row `N−1−n`.
+- The **row of weights that goes to the bottom must therefore be presented first**, i.e. the largest value of k.
 
-### Latences et contrat d'entrée
-- **Contrat** : si `X[k][j]` est présenté sur la voie k au cycle `t0 + j + k`, alors la voie i de `psum_south` porte
-  `Σ_k W[i][k]·X[k][j]` (somme sur les N lignes de la tuile) **au cycle `t0 + j + i + N`**.
-- La sortie est donc décalée en escalier (la voie i est en retard de i cycles), et c'est `output_drain` qui la remet d'équerre.
+### Latencies and input contract
+- **Contract**: if `X[k][j]` is presented on lane k at cycle `t0 + j + k`, then lane i of `psum_south` carries
+  `Σ_k W[i][k]·X[k][j]` (sum over the N rows of the tile) **at cycle `t0 + j + i + N`**.
+- The output is therefore skewed in a staircase (lane i is i cycles late), and `output_drain` squares it up again.
 
-### Coût (N = 4)
-16 PE, soit 768 bascules, 16 multiplieurs et 128 fils de sortie (`psum_south`).
+### Cost (N = 4)
+16 PEs, i.e. 768 flip-flops, 16 multipliers and 128 output wires (`psum_south`).
 
 ---
 
-## Implémentation
+## Implementation
 
-- Fichier : [`pe_array.py`](pe_array.py) — classes `PE_Array_OS` et `PE_Array_WS`.
-- Bloc structurel : il instancie N×N PE et les câble ; les bus de voies sont découpés avec `Range` et réassemblés
-  avec `ConcatenateLSBF`. En WS, la ligne 0 reçoit une constante 0 comme somme partielle.
-- L'attribut `pes[r][c]` donne accès à chaque PE (utilisé par les bancs de test pour observer la grille).
+- File: [`pe_array.py`](pe_array.py) — classes `PE_Array_OS` and `PE_Array_WS`.
+- Structural block: it instantiates N×N PEs and wires them; the lane buses are split with `Range` and reassembled with
+  `ConcatenateLSBF`. In WS, row 0 receives a constant 0 as its partial sum.
+- The attribute `pes[r][c]` gives access to each PE (used by the testbenches to observe the array).
 
-| Constructeur | Ports, dans l'ordre |
+| Constructor | Ports, in order |
 |---|---|
 | `PE_Array_OS(parent, name, …, N=4)` | `rst_n, w_west, x_north, clear, acc` |
 | `PE_Array_WS(parent, name, …, N=4)` | `rst_n, x_west, w_north, load, psum_south` |
 
-**Vérification** ([`test/pe_array/`](../../test/pe_array/)) : câblage comparé cycle par cycle à une grille de modèles de
-référence du PE ; contrats de ce document vérifiés pour N = 1, 2, 3, 4, 8 — résultat juste **et** disponible exactement au
-cycle annoncé (pas un cycle plus tôt) ; préchargement WS ; deux tuiles successives ; écart minimal avant rechargement.
+**Verification** ([`test/pe_array/`](../../test/pe_array/)): wiring compared cycle by cycle with an array of PE
+reference models; the contracts of this document checked for N = 1, 2, 3, 4, 8 — result correct **and** available
+exactly at the announced cycle (not one cycle earlier); WS preload; two successive tiles; minimum gap before reloading.
 
-**Mesuré** : une tuile prend L + 2N − 2 cycles en OS et L + 3N − 2 en WS (préchargement compris) pour un flux de
-longueur L. En WS, il faut **au moins 2N − 2 cycles** entre la dernière colonne de X (voie 0) et le premier `load`
-suivant : avec un cycle de moins, la dernière colonne de Y est fausse.
+**Measured**: a tile takes L + 2N − 2 cycles in OS and L + 3N − 2 in WS (preload included) for a stream of length L.
+In WS, **at least 2N − 2 cycles** are needed between the last column of X (lane 0) and the next `load`: with one cycle
+less, the last column of Y is wrong.
