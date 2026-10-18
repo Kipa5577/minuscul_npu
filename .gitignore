@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+npu_env
+
+# Configuration locale de Claude Code
+.claude/
